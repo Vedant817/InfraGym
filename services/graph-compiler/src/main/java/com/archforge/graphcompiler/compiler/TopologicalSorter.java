@@ -1,9 +1,12 @@
 package com.archforge.graphcompiler.compiler;
 
+import com.archforge.graphcompiler.exception.CompilationException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
 
+@Slf4j
 @Component
 public class TopologicalSorter {
 
@@ -19,7 +22,7 @@ public class TopologicalSorter {
             }
         }
 
-        Queue<String> queue = new LinkedList<>();
+        Queue<String> queue = new PriorityQueue<>(Comparator.naturalOrder());
         for (Map.Entry<String, Integer> entry : inDegree.entrySet()) {
             if (entry.getValue() == 0) {
                 queue.offer(entry.getKey());
@@ -38,6 +41,10 @@ public class TopologicalSorter {
                     queue.offer(neighbor);
                 }
             }
+        }
+
+        if (sorted.size() != graph.getNodeMap().size()) {
+            throw new CompilationException("Graph contains a cycle. Topological sort produced " + sorted.size() + " of " + graph.getNodeMap().size() + " nodes.");
         }
 
         return sorted;

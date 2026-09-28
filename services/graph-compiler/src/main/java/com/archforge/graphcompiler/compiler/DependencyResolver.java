@@ -43,17 +43,50 @@ public class DependencyResolver {
 
     public Map<String, Set<String>> getAllUpstreamDependencies(InternalGraph graph) {
         Map<String, Set<String>> result = new HashMap<>();
-        for (String nodeId : graph.getNodeMap().keySet()) {
-            result.put(nodeId, getUpstreamDependencies(nodeId, graph));
+        List<String> topoOrder = graph.getTopologicalOrder();
+
+        if (topoOrder == null) {
+            for (String nodeId : graph.getNodeMap().keySet()) {
+                result.put(nodeId, getUpstreamDependencies(nodeId, graph));
+            }
+            return result;
         }
+
+        for (String nodeId : topoOrder) {
+            Set<String> upstream = new HashSet<>();
+            for (String pred : graph.getReverseAdjacencyList().getOrDefault(nodeId, Collections.emptyList())) {
+                upstream.add(pred);
+                upstream.addAll(result.get(pred));
+            }
+            result.put(nodeId, upstream);
+        }
+
         return result;
     }
 
     public Map<String, Set<String>> getAllDownstreamDependencies(InternalGraph graph) {
         Map<String, Set<String>> result = new HashMap<>();
-        for (String nodeId : graph.getNodeMap().keySet()) {
-            result.put(nodeId, getDownstreamDependencies(nodeId, graph));
+        List<String> topoOrder = graph.getTopologicalOrder();
+
+        if (topoOrder == null) {
+            for (String nodeId : graph.getNodeMap().keySet()) {
+                result.put(nodeId, getDownstreamDependencies(nodeId, graph));
+            }
+            return result;
         }
+
+        List<String> reversedTopo = new ArrayList<>(topoOrder);
+        Collections.reverse(reversedTopo);
+
+        for (String nodeId : reversedTopo) {
+            Set<String> downstream = new HashSet<>();
+            for (String successor : graph.getAdjacencyList().getOrDefault(nodeId, Collections.emptyList())) {
+                downstream.add(successor);
+                downstream.addAll(result.get(successor));
+            }
+            result.put(nodeId, downstream);
+        }
+
         return result;
     }
 }

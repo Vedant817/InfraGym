@@ -9,11 +9,12 @@ public class GraphMetricsCalculator {
 
     public Map<String, InternalGraph.GraphMetrics> calculate(InternalGraph graph) {
         Map<String, InternalGraph.GraphMetrics> metrics = new HashMap<>();
+        Map<String, Integer> depthMemo = new HashMap<>();
 
         for (String nodeId : graph.getNodeMap().keySet()) {
             int fanIn = graph.getReverseAdjacencyList().getOrDefault(nodeId, Collections.emptyList()).size();
             int fanOut = graph.getAdjacencyList().getOrDefault(nodeId, Collections.emptyList()).size();
-            int depth = calculateDepth(nodeId, graph);
+            int depth = calculateDepth(nodeId, graph, depthMemo);
             int upstreamCount = countUpstream(nodeId, graph);
             int downstreamCount = countDownstream(nodeId, graph);
 
@@ -31,18 +32,23 @@ public class GraphMetricsCalculator {
 
     public int calculateGraphDepth(InternalGraph graph) {
         int maxDepth = 0;
+        Map<String, Integer> depthMemo = new HashMap<>();
         for (String nodeId : graph.getNodeMap().keySet()) {
-            maxDepth = Math.max(maxDepth, calculateDepth(nodeId, graph));
+            maxDepth = Math.max(maxDepth, calculateDepth(nodeId, graph, depthMemo));
         }
         return maxDepth;
     }
 
     public int calculateGraphBreadth(InternalGraph graph) {
-        int maxBreadth = 0;
-        for (List<String> neighbors : graph.getAdjacencyList().values()) {
-            maxBreadth = Math.max(maxBreadth, neighbors.size());
+        Map<Integer, Integer> levelCounts = new HashMap<>();
+        Map<String, Integer> depthMemo = new HashMap<>();
+
+        for (String nodeId : graph.getNodeMap().keySet()) {
+            int depth = calculateDepth(nodeId, graph, depthMemo);
+            levelCounts.merge(depth, 1, Integer::sum);
         }
-        return maxBreadth;
+
+        return levelCounts.values().stream().max(Integer::compareTo).orElse(0);
     }
 
     public List<String> findCriticalPath(InternalGraph graph) {
@@ -83,11 +89,17 @@ public class GraphMetricsCalculator {
         return path;
     }
 
-    private int calculateDepth(String nodeId, InternalGraph graph) {
+    private int calculateDepth(String nodeId, InternalGraph graph, Map<String, Integer> memo) {
+        if (memo.containsKey(nodeId)) {
+            return memo.get(nodeId);
+        }
+
         int maxDepth = 0;
         for (String predecessor : graph.getReverseAdjacencyList().getOrDefault(nodeId, Collections.emptyList())) {
-            maxDepth = Math.max(maxDepth, calculateDepth(predecessor, graph) + 1);
+            maxDepth = Math.max(maxDepth, calculateDepth(predecessor, graph, memo) + 1);
         }
+
+        memo.put(nodeId, maxDepth);
         return maxDepth;
     }
 
