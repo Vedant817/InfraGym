@@ -22,7 +22,7 @@ class DagCompilerTest {
     void setUp() {
         SimulationParameterRegistry registry = new SimulationParameterRegistry();
         NodeEnricher nodeEnricher = new NodeEnricher(registry);
-        GraphMetadataGenerator metadataGenerator = new GraphMetricsCalculator();
+        GraphMetadataGenerator metadataGenerator = new GraphMetadataGenerator(new GraphMetricsCalculator());
         GraphEnrichmentPipeline pipeline = new GraphEnrichmentPipeline(nodeEnricher, metadataGenerator);
         dagCompiler = new DagCompiler(pipeline);
     }

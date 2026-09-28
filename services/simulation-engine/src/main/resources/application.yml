@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: simulation-engine
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: simulation-engine-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        spring.json.trusted.packages: "com.archforge.*"
+        max.poll.records: 100
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: 1
+      properties:
+        batch.size: 16384
+        linger.ms: 1
+        compression.type: snappy
+
+server:
+  port: ${SERVER_PORT:8082}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+simulation:
+  kafka:
+    topics:
+      simulation-tasks: simulation.tasks
+      simulation-telemetry: simulation.telemetry
+  workload:
+    default-duration-seconds: 60
+    default-rps: 1000
+  scenarios:
+    - NORMAL
+    - TRAFFIC_SPIKE
+    - TRAFFIC_DROP
+    - SERVICE_FAILURE
+    - DATABASE_OVERLOAD
+    - CACHE_FAILURE
+    - KAFKA_CONSUMER_FAILURE
+    - NETWORK_DEGRADATION
+    - FLASH_SALE
+
+logging:
+  level:
+    com.archforge.simulation: INFO
