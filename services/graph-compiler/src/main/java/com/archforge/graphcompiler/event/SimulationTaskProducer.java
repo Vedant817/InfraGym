@@ -1,6 +1,7 @@
 package com.archforge.graphcompiler.event;
 
 import com.archforge.graphcompiler.schema.SimulationTaskEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,6 +9,8 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 @Slf4j
@@ -16,6 +19,7 @@ import java.util.concurrent.CompletableFuture;
 public class SimulationTaskProducer {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper;
 
     @Value("${graph-compiler.kafka.topics.simulation-tasks:simulation.tasks}")
     private String simulationTasksTopic;
@@ -40,24 +44,33 @@ public class SimulationTaskProducer {
     }
 
     public void publishToDeadLetter(String message, String reason, String originalTopic) {
-        log.warn("Publishing to dead letter queue: {} from topic: {}, reason: {}", originalTopic, reason, originalTopic);
+        log.warn("Publishing to dead letter queue from topic: {}, reason: {}", originalTopic, reason);
 
-        String dlqMessage = String.format("{\"originalTopic\":\"%s\",\"reason\":\"%s\",\"message\":\"%s\"}",
-                originalTopic, reason, message);
+        try {
+            Map<String, String> dlqMessage = new HashMap<>();
+            dlqMessage.put("originalTopic", originalTopic);
+            dlqMessage.put("reason", reason);
+            dlqMessage.put("message", message);
+            dlqMessage.put("timestamp", java.time.Instant.now().toString());
 
-        kafkaTemplate.send(deadLetterTopic, dlqMessage)
-                .whenComplete((result, ex) -> {
-                    if (ex != null) {
-                        log.error("Failed to publish to dead letter queue", ex);
-                    } else {
-                        log.debug("Published to dead letter queue: {}", result.getRecordMetadata().partition());
-                    }
-                });
+            String json = objectMapper.writeValueAsString(dlqMessage);
+
+            kafkaTemplate.send(deadLetterTopic, json)
+                    .whenComplete((result, ex) -> {
+                        if (ex != null) {
+                            log.error("Failed to publish to dead letter queue for topic: {}", originalTopic, ex);
+                        } else {
+                            log.debug("Published to dead letter queue: partition {}", result.getRecordMetadata().partition());
+                        }
+                    });
+        } catch (Exception e) {
+            log.error("Failed to serialize dead letter message for topic: {}", originalTopic, e);
+        }
     }
 
     private String serializeEvent(SimulationTaskEvent event) {
         try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(event);
+            return objectMapper.writeValueAsString(event);
         } catch (Exception e) {
             log.error("Failed to serialize simulation task event", e);
             throw new RuntimeException("Failed to serialize simulation task event", e);
