@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      routes:
+        - id: graph-compiler
+          uri: ${GRAPH_COMPILER_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/compile/**
+        - id: canvas-session
+          uri: ${CANVAS_SESSION_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/v1/session/**
+        - id: ai-evaluator
+          uri: ${AI_EVALUATOR_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/v1/evaluate/**
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Origin
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOrigins: "*"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,gateway
+  endpoint:
+    health:
+      show-details: when-authorized
+
+gateway:
+  rate-limit:
+    requests-per-minute: 60
+    burst-capacity: 10
+
+logging:
+  level:
+    com.archforge.gateway: INFO
