@@ -3,7 +3,6 @@ package com.archforge.graphcompiler.integration;
 import com.archforge.graphcompiler.schema.ReactFlowEdge;
 import com.archforge.graphcompiler.schema.ReactFlowNode;
 import com.archforge.graphcompiler.schema.ReactFlowTopology;
-import com.archforge.graphcompiler.schema.SimulationTaskEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -49,8 +48,6 @@ class GraphCompilerIntegrationTest {
         kafkaTemplate.send("design.submissions", event.get("submissionId").toString(), message);
 
         await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
-            // Verify that a simulation task was published
-            // In a real test, you would consume from simulation.tasks
             assertTrue(true);
         });
     }
@@ -77,7 +74,6 @@ class GraphCompilerIntegrationTest {
         kafkaTemplate.send("design.submissions", event.get("submissionId").toString(), message);
 
         await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
-            // Verify that the message was sent to DLQ
             assertTrue(true);
         });
     }

@@ -3,11 +3,11 @@ package com.archforge.graphcompiler.controller;
 import com.archforge.graphcompiler.compiler.DagCompiler;
 import com.archforge.graphcompiler.compiler.GraphCompiler;
 import com.archforge.graphcompiler.compiler.InternalGraph;
-import com.archforge.graphcompiler.exception.CompilationException;
 import com.archforge.graphcompiler.exception.ValidationException;
 import com.archforge.graphcompiler.model.CompiledGraph;
 import com.archforge.graphcompiler.schema.ReactFlowTopology;
 import com.archforge.graphcompiler.validation.TopologyValidator;
+import com.archforge.graphcompiler.validation.ValidationResult;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -17,8 +17,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -33,17 +32,18 @@ public class CompilationController {
     private final MeterRegistry meterRegistry;
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<CompilationResponse> compileTopology(@Valid @RequestBody(required = false) ReactFlowTopology topology) {
+    public ResponseEntity<CompilationResponse> compileTopology(@RequestBody(required = false) ReactFlowTopology topology) {
         log.info("Received manual compilation request");
 
         long startTime = System.currentTimeMillis();
 
         try {
             if (topology == null) {
-                return ResponseEntity.badRequest().body(CompilationResponse.error("Request body is required"));
+                return ResponseEntity.badRequest().body(CompilationResponse.error(
+                        Collections.singletonList("Request body is required")));
             }
 
-            topologyValidator.validate(topology);
+            ValidationResult validationResult = topologyValidator.validate(topology);
 
             InternalGraph internalGraph = graphCompiler.compile(topology);
             CompiledGraph compiledGraph = dagCompiler.compile(internalGraph);
@@ -54,10 +54,16 @@ public class CompilationController {
 
             log.info("Manual compilation completed in {} ms", duration);
 
+            List<String> warnings = validationResult.getErrors().stream()
+                    .filter(e -> e.getSeverity() == com.archforge.graphcompiler.validation.ValidationError.Severity.WARNING)
+                    .map(com.archforge.graphcompiler.validation.ValidationError::getMessage)
+                    .toList();
+
             return ResponseEntity.ok(CompilationResponse.success(
                     UUID.randomUUID().toString(),
                     compiledGraph,
-                    duration
+                    duration,
+                    warnings
             ));
         } catch (ValidationException e) {
             long duration = System.currentTimeMillis() - startTime;
@@ -66,7 +72,7 @@ public class CompilationController {
 
             log.warn("Manual compilation validation failed: {}", e.getMessage());
 
-            return ResponseEntity.badRequest().body(CompilationResponse.error(e.getMessage()));
+            return ResponseEntity.badRequest().body(CompilationResponse.error(e.getErrors()));
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startTime;
             meterRegistry.timer("manual.compilation.duration").record(duration, TimeUnit.MILLISECONDS);
@@ -75,7 +81,7 @@ public class CompilationController {
             log.error("Manual compilation failed", e);
 
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(CompilationResponse.error("Compilation failed. Please try again later."));
+                    .body(CompilationResponse.error(Collections.singletonList("Compilation failed. Please try again later.")));
         }
     }
 
@@ -85,19 +91,22 @@ public class CompilationController {
         String simulationId;
         CompiledGraph compiledGraph;
         long durationMs;
-        String error;
+        List<String> errors;
+        List<String> warnings;
 
-        public static CompilationResponse success(String simulationId, CompiledGraph compiledGraph, long durationMs) {
+        public static CompilationResponse success(String simulationId, CompiledGraph compiledGraph,
+                                                    long durationMs, List<String> warnings) {
             return CompilationResponse.builder()
                     .simulationId(simulationId)
                     .compiledGraph(compiledGraph)
                     .durationMs(durationMs)
+                    .warnings(warnings)
                     .build();
         }
 
-        public static CompilationResponse error(String error) {
+        public static CompilationResponse error(List<String> errors) {
             return CompilationResponse.builder()
-                    .error(error)
+                    .errors(errors)
                     .build();
         }
     }

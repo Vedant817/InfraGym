@@ -1,6 +1,5 @@
 package com.archforge.graphcompiler.validation;
 
-import com.archforge.graphcompiler.exception.ValidationException;
 import com.archforge.graphcompiler.schema.ReactFlowNode;
 import com.archforge.graphcompiler.schema.ReactFlowTopology;
 import org.springframework.stereotype.Component;
@@ -11,11 +10,7 @@ import java.util.Set;
 @Component
 public class NodeTypeValidator {
 
-    private static final Set<String> VALID_TYPES = Set.of(
-            "service", "cache", "database", "queue", "load_balancer",
-            "cdn", "worker", "external", "gateway", "auth", "monitoring",
-            "function", "storage"
-    );
+    private static final int MAX_TYPE_LENGTH = 100;
 
     public ValidationResult validate(ReactFlowTopology topology) {
         ValidationResult result = new ValidationResult();
@@ -25,6 +20,7 @@ public class NodeTypeValidator {
         }
 
         List<ReactFlowNode> nodes = topology.getNodes();
+        Set<String> validTypes = com.archforge.graphcompiler.schema.NodeType.getAllValues();
 
         for (int i = 0; i < nodes.size(); i++) {
             ReactFlowNode node = nodes.get(i);
@@ -39,13 +35,20 @@ public class NodeTypeValidator {
                 continue;
             }
 
+            if (type.length() > MAX_TYPE_LENGTH) {
+                result.addError(fieldPrefix + ".type", "INVALID_NODE_TYPE",
+                        "Node '" + node.getId() + "' has type exceeding maximum length of " + MAX_TYPE_LENGTH + " characters",
+                        ValidationError.Severity.ERROR);
+                continue;
+            }
+
             if (!isValidType(type)) {
                 String suggestion = findClosestMatch(type);
                 String message = "Node '" + node.getId() + "' has unknown type '" + type + "'.";
                 if (suggestion != null) {
                     message += " Did you mean '" + suggestion + "'?";
                 }
-                message += " Valid types: " + String.join(", ", VALID_TYPES);
+                message += " Valid types: " + String.join(", ", validTypes);
 
                 result.addError(fieldPrefix + ".type", "INVALID_NODE_TYPE", message, ValidationError.Severity.ERROR);
             }
@@ -55,14 +58,18 @@ public class NodeTypeValidator {
     }
 
     private boolean isValidType(String type) {
-        return VALID_TYPES.contains(type.toLowerCase());
+        return com.archforge.graphcompiler.schema.NodeType.getAllValues().contains(type.toLowerCase());
     }
 
     private String findClosestMatch(String input) {
+        if (input.length() > MAX_TYPE_LENGTH) {
+            return null;
+        }
+
         String closest = null;
         int minDistance = Integer.MAX_VALUE;
 
-        for (String validType : VALID_TYPES) {
+        for (String validType : com.archforge.graphcompiler.schema.NodeType.getAllValues()) {
             int distance = levenshteinDistance(input.toLowerCase(), validType);
             if (distance < minDistance && distance <= 3) {
                 minDistance = distance;

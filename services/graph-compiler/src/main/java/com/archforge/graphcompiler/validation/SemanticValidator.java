@@ -1,5 +1,6 @@
 package com.archforge.graphcompiler.validation;
 
+import com.archforge.graphcompiler.schema.NodeType;
 import com.archforge.graphcompiler.schema.ReactFlowNode;
 import com.archforge.graphcompiler.schema.ReactFlowTopology;
 import org.springframework.stereotype.Component;
@@ -21,8 +22,12 @@ public class SemanticValidator {
         boolean hasEntryPoint = nodes.stream()
                 .filter(n -> n != null && n.getType() != null)
                 .anyMatch(n -> {
-                    String type = n.getType().toLowerCase();
-                    return type.equals("load_balancer") || type.equals("gateway") || type.equals("cdn");
+                    try {
+                        NodeType type = NodeType.fromValue(n.getType());
+                        return type == NodeType.LOAD_BALANCER || type == NodeType.GATEWAY || type == NodeType.CDN;
+                    } catch (Exception e) {
+                        return false;
+                    }
                 });
 
         if (!hasEntryPoint) {
@@ -34,8 +39,12 @@ public class SemanticValidator {
         boolean hasComputeNode = nodes.stream()
                 .filter(n -> n != null && n.getType() != null)
                 .anyMatch(n -> {
-                    String type = n.getType().toLowerCase();
-                    return type.equals("service") || type.equals("worker") || type.equals("function");
+                    try {
+                        NodeType type = NodeType.fromValue(n.getType());
+                        return type.isCompute();
+                    } catch (Exception e) {
+                        return false;
+                    }
                 });
 
         if (!hasComputeNode) {

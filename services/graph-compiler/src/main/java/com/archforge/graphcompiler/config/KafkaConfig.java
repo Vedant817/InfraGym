@@ -11,7 +11,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
 import org.springframework.kafka.listener.DefaultErrorHandler;
-import org.springframework.kafka.support.ExponentialBackOffWithMaxRetries;
 import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
@@ -62,7 +61,7 @@ public class KafkaConfig {
         config.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
         config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         config.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 500);
         config.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 300000);
@@ -83,29 +82,24 @@ public class KafkaConfig {
 
     @Bean
     public DefaultErrorHandler errorHandler(KafkaTemplate<String, String> template) {
-        DefaultErrorHandler handler = new DefaultErrorHandler(
+        return new DefaultErrorHandler(
                 new org.springframework.kafka.listener.DeadLetterPublishingRecoverer(template),
-                new FixedBackOff(1000L, 3L)
+                new FixedBackOff(1000L, 5L)
         );
-        handler.addNotRetryableExceptions(
-                com.archforge.graphcompiler.exception.ValidationException.class,
-                com.archforge.graphcompiler.exception.CompilationException.class
-        );
-        return handler;
     }
 
     @Bean
     public NewTopic designSubmissionsTopic() {
-        return new NewTopic(designSubmissionsTopic, 3, (short) 1);
+        return new NewTopic(designSubmissionsTopic, 3, (short) 3);
     }
 
     @Bean
     public NewTopic simulationTasksTopic() {
-        return new NewTopic(simulationTasksTopic, 3, (short) 1);
+        return new NewTopic(simulationTasksTopic, 3, (short) 3);
     }
 
     @Bean
     public NewTopic deadLetterTopic() {
-        return new NewTopic(deadLetterTopic, 1, (short) 1);
+        return new NewTopic(deadLetterTopic, 1, (short) 3);
     }
 }

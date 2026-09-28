@@ -11,12 +11,15 @@ public class GraphMetricsCalculator {
         Map<String, InternalGraph.GraphMetrics> metrics = new HashMap<>();
         Map<String, Integer> depthMemo = new HashMap<>();
 
+        Map<String, Set<String>> upstreamCounts = computeUpstreamCounts(graph);
+        Map<String, Set<String>> downstreamCounts = computeDownstreamCounts(graph);
+
         for (String nodeId : graph.getNodeMap().keySet()) {
             int fanIn = graph.getReverseAdjacencyList().getOrDefault(nodeId, Collections.emptyList()).size();
             int fanOut = graph.getAdjacencyList().getOrDefault(nodeId, Collections.emptyList()).size();
             int depth = calculateDepth(nodeId, graph, depthMemo);
-            int upstreamCount = countUpstream(nodeId, graph);
-            int downstreamCount = countDownstream(nodeId, graph);
+            int upstreamCount = upstreamCounts.getOrDefault(nodeId, Collections.emptySet()).size();
+            int downstreamCount = downstreamCounts.getOrDefault(nodeId, Collections.emptySet()).size();
 
             metrics.put(nodeId, InternalGraph.GraphMetrics.builder()
                     .depth(depth)
@@ -52,6 +55,10 @@ public class GraphMetricsCalculator {
     }
 
     public List<String> findCriticalPath(InternalGraph graph) {
+        if (graph.getTopologicalOrder() == null) {
+            return Collections.emptyList();
+        }
+
         Map<String, Integer> longestPath = new HashMap<>();
         Map<String, String> predecessor = new HashMap<>();
 
@@ -89,6 +96,55 @@ public class GraphMetricsCalculator {
         return path;
     }
 
+    private Map<String, Set<String>> computeUpstreamCounts(InternalGraph graph) {
+        Map<String, Set<String>> result = new HashMap<>();
+        List<String> topoOrder = graph.getTopologicalOrder();
+
+        if (topoOrder == null) {
+            for (String nodeId : graph.getNodeMap().keySet()) {
+                result.put(nodeId, new HashSet<>());
+            }
+            return result;
+        }
+
+        for (String nodeId : topoOrder) {
+            Set<String> upstream = new HashSet<>();
+            for (String pred : graph.getReverseAdjacencyList().getOrDefault(nodeId, Collections.emptyList())) {
+                upstream.add(pred);
+                upstream.addAll(result.get(pred));
+            }
+            result.put(nodeId, upstream);
+        }
+
+        return result;
+    }
+
+    private Map<String, Set<String>> computeDownstreamCounts(InternalGraph graph) {
+        Map<String, Set<String>> result = new HashMap<>();
+        List<String> topoOrder = graph.getTopologicalOrder();
+
+        if (topoOrder == null) {
+            for (String nodeId : graph.getNodeMap().keySet()) {
+                result.put(nodeId, new HashSet<>());
+            }
+            return result;
+        }
+
+        List<String> reversedTopo = new ArrayList<>(topoOrder);
+        Collections.reverse(reversedTopo);
+
+        for (String nodeId : reversedTopo) {
+            Set<String> downstream = new HashSet<>();
+            for (String successor : graph.getAdjacencyList().getOrDefault(nodeId, Collections.emptyList())) {
+                downstream.add(successor);
+                downstream.addAll(result.get(successor));
+            }
+            result.put(nodeId, downstream);
+        }
+
+        return result;
+    }
+
     private int calculateDepth(String nodeId, InternalGraph graph, Map<String, Integer> memo) {
         if (memo.containsKey(nodeId)) {
             return memo.get(nodeId);
@@ -101,39 +157,5 @@ public class GraphMetricsCalculator {
 
         memo.put(nodeId, maxDepth);
         return maxDepth;
-    }
-
-    private int countUpstream(String nodeId, InternalGraph graph) {
-        Set<String> visited = new HashSet<>();
-        Deque<String> stack = new ArrayDeque<>();
-        stack.push(nodeId);
-
-        while (!stack.isEmpty()) {
-            String current = stack.pop();
-            for (String predecessor : graph.getReverseAdjacencyList().getOrDefault(current, Collections.emptyList())) {
-                if (visited.add(predecessor)) {
-                    stack.push(predecessor);
-                }
-            }
-        }
-
-        return visited.size();
-    }
-
-    private int countDownstream(String nodeId, InternalGraph graph) {
-        Set<String> visited = new HashSet<>();
-        Deque<String> stack = new ArrayDeque<>();
-        stack.push(nodeId);
-
-        while (!stack.isEmpty()) {
-            String current = stack.pop();
-            for (String successor : graph.getAdjacencyList().getOrDefault(current, Collections.emptyList())) {
-                if (visited.add(successor)) {
-                    stack.push(successor);
-                }
-            }
-        }
-
-        return visited.size();
     }
 }

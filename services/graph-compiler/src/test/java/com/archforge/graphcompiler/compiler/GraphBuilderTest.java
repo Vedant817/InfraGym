@@ -100,7 +100,7 @@ class GraphBuilderTest {
         ReactFlowNode cache = new ReactFlowNode();
         cache.setId("cache");
         cache.setType("cache");
-        api.setData(new NodeData());
+        cache.setData(new NodeData());
         cache.getData().setLabel("Cache");
 
         ReactFlowNode db = new ReactFlowNode();

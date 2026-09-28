@@ -1,6 +1,6 @@
 package com.archforge.graphcompiler.controller;
 
-import com.archforge.graphcompiler.event.SimulationTaskProducer;
+import com.archforge.graphcompiler.validation.TopologyValidator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +20,7 @@ public class DeadLetterController {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final TopologyValidator topologyValidator;
 
     @Value("${graph-compiler.kafka.topics.design-submissions:design.submissions}")
     private String designSubmissionsTopic;
@@ -55,8 +56,7 @@ public class DeadLetterController {
         } catch (Exception e) {
             log.error("Failed to parse DLQ message", e);
             return ResponseEntity.badRequest().body(Map.of(
-                    "error", "Invalid DLQ message format",
-                    "details", e.getMessage()
+                    "error", "Invalid DLQ message format"
             ));
         }
     }
