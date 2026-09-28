@@ -37,7 +37,7 @@ public class KafkaConfig {
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        config.put(ProducerConfig.ACKS_CONFIG, "1");
+        config.put(ProducerConfig.ACKS_CONFIG, "all");
         config.put(ProducerConfig.BATCH_SIZE_CONFIG, 16384);
         config.put(ProducerConfig.LINGER_MS_CONFIG, 1);
         config.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "snappy");
@@ -56,7 +56,7 @@ public class KafkaConfig {
         config.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
         config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         config.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 100);
         return new DefaultKafkaConsumerFactory<>(config);
@@ -78,17 +78,17 @@ public class KafkaConfig {
     public DefaultErrorHandler errorHandler(KafkaTemplate<String, String> template) {
         return new DefaultErrorHandler(
                 new org.springframework.kafka.listener.DeadLetterPublishingRecoverer(template),
-                new FixedBackOff(1000L, 3L)
+                new FixedBackOff(1000L, 5L)
         );
     }
 
     @Bean
     public NewTopic simulationTasksTopic() {
-        return new NewTopic(simulationTasksTopic, 3, (short) 1);
+        return new NewTopic(simulationTasksTopic, 3, (short) 3);
     }
 
     @Bean
     public NewTopic simulationTelemetryTopic() {
-        return new NewTopic(simulationTelemetryTopic, 6, (short) 1);
+        return new NewTopic(simulationTelemetryTopic, 6, (short) 3);
     }
 }

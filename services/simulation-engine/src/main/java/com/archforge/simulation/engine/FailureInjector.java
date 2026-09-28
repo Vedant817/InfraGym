@@ -13,6 +13,10 @@ public class FailureInjector {
     private final Random random = new Random();
 
     public List<FailureScenario> generateFailures(SimulationTask task, String scenarioType) {
+        if (task == null || task.getCompiledGraph() == null) {
+            return Collections.emptyList();
+        }
+
         return switch (scenarioType) {
             case "SERVICE_FAILURE" -> generateServiceFailure(task);
             case "CACHE_FAILURE" -> generateCacheFailure(task);
@@ -93,8 +97,11 @@ public class FailureInjector {
 
     private List<FailureScenario> generateNetworkDegradation(SimulationTask task) {
         List<FailureScenario> failures = new ArrayList<>();
-        List<String> allNodes = new ArrayList<>(task.getCompiledGraph().getNodes().size());
-        task.getCompiledGraph().getNodes().forEach(n -> allNodes.add(n.getId()));
+        List<String> allNodes = new ArrayList<>();
+
+        if (task.getCompiledGraph() != null && task.getCompiledGraph().getNodes() != null) {
+            task.getCompiledGraph().getNodes().forEach(n -> allNodes.add(n.getId()));
+        }
 
         if (!allNodes.isEmpty()) {
             String targetNode = allNodes.get(random.nextInt(allNodes.size()));
@@ -110,7 +117,7 @@ public class FailureInjector {
     }
 
     private List<String> findNodesByType(SimulationTask task, String nodeType) {
-        if (task.getCompiledGraph() == null) {
+        if (task.getCompiledGraph() == null || task.getCompiledGraph().getNodes() == null) {
             return Collections.emptyList();
         }
         return task.getCompiledGraph().getNodes().stream()
@@ -119,8 +126,23 @@ public class FailureInjector {
                 .toList();
     }
 
-    public boolean isFailureActive(FailureScenario failure, int elapsedSeconds) {
+    public static boolean isFailureActive(FailureScenario failure, int elapsedSeconds) {
         return elapsedSeconds >= failure.startSecond() && elapsedSeconds < failure.startSecond() + failure.durationSeconds();
+    }
+
+    public List<String> getAffectedNodes(FailureScenario failure, SimulationTask task) {
+        List<String> affected = new ArrayList<>();
+        affected.add(failure.nodeId());
+
+        if (task.getCompiledGraph() != null && task.getCompiledGraph().getNodes() != null) {
+            for (var node : task.getCompiledGraph().getNodes()) {
+                if (node.getDependents() != null && node.getDependents().contains(failure.nodeId())) {
+                    affected.add(node.getId());
+                }
+            }
+        }
+
+        return affected;
     }
 
     public record FailureScenario(String type, String nodeId, int startSecond, int durationSeconds, String description) {}

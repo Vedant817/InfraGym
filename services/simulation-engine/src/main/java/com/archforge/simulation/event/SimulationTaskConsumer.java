@@ -42,6 +42,12 @@ public class SimulationTaskConsumer {
             return;
         }
 
+        if (task.getCompiledGraph() == null) {
+            log.error("Invalid simulation task: null compiledGraph");
+            acknowledgment.acknowledge();
+            return;
+        }
+
         log.info("Processing simulation task: {}", task.getSimulationId());
 
         try {
@@ -50,7 +56,6 @@ public class SimulationTaskConsumer {
             log.info("Successfully completed simulation: {}", result.getSimulationId());
         } catch (Exception e) {
             log.error("Failed to run simulation: {}", task.getSimulationId(), e);
-            acknowledgment.acknowledge();
         }
     }
 }
