@@ -1,7 +1,7 @@
 package com.archforge.graphcompiler.enrichment;
 
 import com.archforge.graphcompiler.compiler.InternalGraph;
-import com.archforge.graphcompiler.schema.NodeType;
+import com.archforge.graphcompiler.exception.ValidationException;
 import com.archforge.graphcompiler.schema.ReactFlowNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,17 +27,21 @@ public class NodeEnricher {
                 continue;
             }
 
-            NodeType nodeType;
+            com.archforge.graphcompiler.schema.NodeType nodeType;
             try {
-                nodeType = NodeType.fromValue(node.getType());
-            } catch (Exception e) {
+                nodeType = com.archforge.graphcompiler.schema.NodeType.fromValue(node.getType());
+            } catch (ValidationException e) {
                 log.warn("Unknown node type '{}' for node '{}', skipping enrichment", node.getType(), nodeId);
                 continue;
             }
 
             SimulationParameters params = parameterRegistry.getParameters(nodeType);
-            Map<String, Object> metadata = new HashMap<>();
 
+            if (node.getData() != null && node.getData().getConfig() != null && !node.getData().getConfig().isEmpty()) {
+                params = params.mergeWith(node.getData().getConfig());
+            }
+
+            Map<String, Object> metadata = new HashMap<>();
             metadata.put("capacity", new HashMap<>(params.getCapacity()));
             metadata.put("latency", new HashMap<>(params.getLatency()));
             metadata.put("throughput", new HashMap<>(params.getThroughput()));

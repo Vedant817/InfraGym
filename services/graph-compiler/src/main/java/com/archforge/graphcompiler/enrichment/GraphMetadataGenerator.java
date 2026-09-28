@@ -2,6 +2,7 @@ package com.archforge.graphcompiler.enrichment;
 
 import com.archforge.graphcompiler.compiler.GraphMetricsCalculator;
 import com.archforge.graphcompiler.compiler.InternalGraph;
+import com.archforge.graphcompiler.exception.ValidationException;
 import com.archforge.graphcompiler.schema.NodeType;
 import com.archforge.graphcompiler.schema.ReactFlowNode;
 import lombok.RequiredArgsConstructor;
@@ -55,7 +56,8 @@ public class GraphMetadataGenerator {
                 if (type.isStorage()) storageNodes++;
                 if (type.isMessaging()) messagingNodes++;
                 if (type.isNetwork() || type.isEdge()) networkNodes++;
-            } catch (Exception ignored) {
+            } catch (ValidationException e) {
+                log.debug("Unknown node type '{}' during metadata generation", node.getType());
             }
         }
 
@@ -82,11 +84,12 @@ public class GraphMetadataGenerator {
             return 0;
         }
 
-        double edgeDensity = (double) edges / (nodes * (nodes - 1) / 2);
+        double edgeDensity = nodes > 1 ? (double) edges / ((long) nodes * (nodes - 1) / 2) : 0;
         double depthFactor = (double) depth / nodes;
         double breadthFactor = (double) breadth / nodes;
 
-        return (edgeDensity * 0.4 + depthFactor * 0.3 + breadthFactor * 0.3) * 100;
+        double score = (edgeDensity * 0.3 + depthFactor * 0.2 + breadthFactor * 0.2 + Math.min(nodes / 100.0, 1.0) * 0.3) * 100;
+        return Math.min(score, 100.0);
     }
 
     private String getComplexityRating(double score) {
