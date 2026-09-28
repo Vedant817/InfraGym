@@ -9,15 +9,26 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       properties:
-        spring.json.trusted.packages: "*"
+        spring.json.trusted.packages: "com.archforge.graphcompiler.*"
+        max.poll.records: 500
+        max.poll.interval.ms: 300000
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       acks: all
-      retries: 3
+      retries: 3:
+      properties:
+        enable.idempotence: true
+        batch.size: 16384
+        linger.ms: 5
+        compression.type: snappy
+    listener:
+      concurrency: 3
+      ack-mode: manual
 
 server:
-  port: 8081
+  port: ${SERVER_PORT:8081}
+  shutdown: graceful
 
 management:
   endpoints:
@@ -26,7 +37,21 @@ management:
         include: health,info,metrics
   endpoint:
     health:
-      show-details: when-authorized
+      show-details: always
+
+graph-compiler:
+  kafka:
+    topics:
+      design-submissions: design.submissions
+      simulation-tasks: simulation.tasks
+      simulation-telemetry: simulation.telemetry
+      dead-letter: graph-compiler.dlt
+    consumer:
+      max-poll-records: 500
+      poll-timeout: 5000
+    producer:
+      retries: 3
+      retry-backoff-ms: 1000
 
 logging:
   level:

@@ -1,5 +1,6 @@
 package com.archforge.graphcompiler.schema;
 
+import com.archforge.graphcompiler.exception.ValidationException;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
 
@@ -15,7 +16,12 @@ public enum NodeType {
     LOAD_BALANCER("load_balancer"),
     CDN("cdn"),
     WORKER("worker"),
-    EXTERNAL("external");
+    EXTERNAL("external"),
+    GATEWAY("gateway"),
+    AUTH("auth"),
+    MONITORING("monitoring"),
+    FUNCTION("function"),
+    STORAGE("storage");
 
     private final String value;
 
@@ -33,7 +39,8 @@ public enum NodeType {
         return Arrays.stream(values())
                 .filter(type -> type.value.equalsIgnoreCase(value))
                 .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Unknown node type: " + value));
+                .orElseThrow(() -> new ValidationException(
+                        "Unknown node type '" + value + "'. Valid types: " + getAllValues()));
     }
 
     public static Set<String> getAllValues() {
@@ -43,11 +50,11 @@ public enum NodeType {
     }
 
     public boolean isStorage() {
-        return this == DATABASE || this == CACHE;
+        return this == DATABASE || this == CACHE || this == STORAGE;
     }
 
     public boolean isCompute() {
-        return this == SERVICE || this == WORKER;
+        return this == SERVICE || this == WORKER || this == FUNCTION;
     }
 
     public boolean isMessaging() {
@@ -55,6 +62,14 @@ public enum NodeType {
     }
 
     public boolean isNetwork() {
-        return this == LOAD_BALANCER || this == CDN;
+        return this == LOAD_BALANCER;
+    }
+
+    public boolean isEdge() {
+        return this == CDN;
+    }
+
+    public boolean isExternal() {
+        return this == EXTERNAL;
     }
 }

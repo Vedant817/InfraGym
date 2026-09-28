@@ -10,4 +10,7 @@ public class ReactFlowNode {
     private String type;
     private Position position;
     private NodeData data;
+    private String parentId;
+    private Double width;
+    private Double height;
 }

@@ -9,5 +9,8 @@ public class ReactFlowEdge {
     private String id;
     private String source;
     private String target;
+    private String sourceHandle;
+    private String targetHandle;
     private String label;
+    private String type;
 }
