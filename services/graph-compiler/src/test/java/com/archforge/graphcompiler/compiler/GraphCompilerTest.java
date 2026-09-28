@@ -1,5 +1,6 @@
 package com.archforge.graphcompiler.compiler;
 
+import com.archforge.graphcompiler.exception.CompilationException;
 import com.archforge.graphcompiler.schema.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,12 +40,17 @@ class GraphCompilerTest {
     }
 
     @Test
-    void compileEmptyTopology() {
+    void compileEmptyTopologyThrowsException() {
         ReactFlowTopology topology = new ReactFlowTopology();
         topology.setNodes(Collections.emptyList());
         topology.setEdges(Collections.emptyList());
 
-        assertThrows(Exception.class, () -> graphCompiler.compile(topology));
+        assertThrows(CompilationException.class, () -> graphCompiler.compile(topology));
+    }
+
+    @Test
+    void compileNullTopologyThrowsException() {
+        assertThrows(CompilationException.class, () -> graphCompiler.compile(null));
     }
 
     @Test
@@ -76,6 +82,65 @@ class GraphCompilerTest {
         List<String> topoOrder = graph.getTopologicalOrder();
         assertTrue(topoOrder.indexOf("api") < topoOrder.indexOf("cache"));
         assertTrue(topoOrder.indexOf("cache") < topoOrder.indexOf("db"));
+    }
+
+    @Test
+    void compileDisconnectedGraph() {
+        ReactFlowTopology topology = new ReactFlowTopology();
+
+        ReactFlowNode a = createNode("a", "A");
+        ReactFlowNode b = createNode("b", "B");
+        ReactFlowNode c = createNode("c", "C");
+        ReactFlowNode d = createNode("d", "D");
+
+        ReactFlowEdge e1 = createEdge("e1", "a", "b");
+        ReactFlowEdge e2 = createEdge("e2", "c", "d");
+
+        topology.setNodes(Arrays.asList(a, b, c, d));
+        topology.setEdges(Arrays.asList(e1, e2));
+
+        InternalGraph graph = graphCompiler.compile(topology);
+
+        assertNotNull(graph);
+        assertEquals(4, graph.getNodeMap().size());
+        assertEquals(2, graph.getEdges().size());
+    }
+
+    @Test
+    void compileTopologyWithIsolatedNode() {
+        ReactFlowTopology topology = new ReactFlowTopology();
+
+        ReactFlowNode a = createNode("a", "A");
+        ReactFlowNode b = createNode("b", "B");
+        ReactFlowNode isolated = createNode("isolated", "Isolated");
+
+        ReactFlowEdge e1 = createEdge("e1", "a", "b");
+
+        topology.setNodes(Arrays.asList(a, b, isolated));
+        topology.setEdges(Collections.singletonList(e1));
+
+        InternalGraph graph = graphCompiler.compile(topology);
+
+        assertNotNull(graph);
+        assertEquals(3, graph.getNodeMap().size());
+        assertEquals(1, graph.getEdges().size());
+    }
+
+    private ReactFlowNode createNode(String id, String label) {
+        ReactFlowNode node = new ReactFlowNode();
+        node.setId(id);
+        node.setType("service");
+        node.setData(new NodeData());
+        node.getData().setLabel(label);
+        return node;
+    }
+
+    private ReactFlowEdge createEdge(String id, String source, String target) {
+        ReactFlowEdge edge = new ReactFlowEdge();
+        edge.setId(id);
+        edge.setSource(source);
+        edge.setTarget(target);
+        return edge;
     }
 
     private ReactFlowTopology createValidTopology() {

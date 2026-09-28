@@ -22,7 +22,7 @@ class DagCompilerTest {
     void setUp() {
         SimulationParameterRegistry registry = new SimulationParameterRegistry();
         NodeEnricher nodeEnricher = new NodeEnricher(registry);
-        GraphMetadataGenerator metadataGenerator = new GraphMetadataCalculator();
+        GraphMetadataGenerator metadataGenerator = new GraphMetricsCalculator();
         GraphEnrichmentPipeline pipeline = new GraphEnrichmentPipeline(nodeEnricher, metadataGenerator);
         dagCompiler = new DagCompiler(pipeline);
     }
@@ -81,6 +81,63 @@ class DagCompilerTest {
         for (CompiledNode node : compiledGraph.getNodes()) {
             assertNotNull(node.getSimulationMetadata());
             assertFalse(node.getSimulationMetadata().isEmpty());
+        }
+    }
+
+    @Test
+    void compileNullGraphThrowsException() {
+        assertThrows(NullPointerException.class, () -> dagCompiler.compile(null));
+    }
+
+    @Test
+    void compileGraphWithNullTopologicalOrderThrowsException() {
+        ReactFlowTopology topology = createValidTopology();
+        GraphBuilder graphBuilder = new GraphBuilder();
+
+        InternalGraph internalGraph = graphBuilder.build(topology);
+        internalGraph.setTopologicalOrder(null);
+
+        assertThrows(NullPointerException.class, () -> dagCompiler.compile(internalGraph));
+    }
+
+    @Test
+    void compiledEdgesHaveProtocolInference() {
+        ReactFlowTopology topology = createValidTopology();
+        GraphBuilder graphBuilder = new GraphBuilder();
+        TopologicalSorter sorter = new TopologicalSorter();
+        GraphMetricsCalculator metricsCalculator = new GraphMetricsCalculator();
+
+        InternalGraph internalGraph = graphBuilder.build(topology);
+        internalGraph.setTopologicalOrder(sorter.sort(internalGraph));
+        internalGraph.setNodeMetrics(metricsCalculator.calculate(internalGraph));
+
+        CompiledGraph compiledGraph = dagCompiler.compile(internalGraph);
+
+        assertFalse(compiledGraph.getEdges().isEmpty());
+        for (var edge : compiledGraph.getEdges()) {
+            assertNotNull(edge.getProtocol());
+            assertNotEquals("unknown", edge.getProtocol());
+        }
+    }
+
+    @Test
+    void compiledEdgesHaveBandwidthAndLatency() {
+        ReactFlowTopology topology = createValidTopology();
+        GraphBuilder graphBuilder = new GraphBuilder();
+        TopologicalSorter sorter = new TopologicalSorter();
+        GraphMetricsCalculator metricsCalculator = new GraphMetricsCalculator();
+
+        InternalGraph internalGraph = graphBuilder.build(topology);
+        internalGraph.setTopologicalOrder(sorter.sort(internalGraph));
+        internalGraph.setNodeMetrics(metricsCalculator.calculate(internalGraph));
+
+        CompiledGraph compiledGraph = dagCompiler.compile(internalGraph);
+
+        for (var edge : compiledGraph.getEdges()) {
+            assertNotNull(edge.getBandwidthMbps());
+            assertNotNull(edge.getLatencyMs());
+            assertTrue(edge.getBandwidthMbps() > 0);
+            assertTrue(edge.getLatencyMs() > 0);
         }
     }
 
