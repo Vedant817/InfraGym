@@ -7,6 +7,10 @@ import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -17,18 +21,29 @@ public class KafkaHealthIndicator implements HealthIndicator {
     @Override
     public Health health() {
         try {
-            kafkaTemplate.execute(template -> {
-                log.debug("Kafka health check: broker connection OK");
-                return null;
-            });
-            return Health.up()
-                    .withDetail("broker", "connected")
+            CompletableFuture<String> future = kafkaTemplate.send("health-check", "ping")
+                    .thenApply(result -> "pong");
+
+            String result = future.get(5, TimeUnit.SECONDS);
+
+            if ("pong".equals(result)) {
+                return Health.up()
+                        .withDetail("broker", "connected")
+                        .build();
+            } else {
+                return Health.down()
+                        .withDetail("broker", "unexpected response")
+                        .build();
+            }
+        } catch (TimeoutException e) {
+            log.error("Kafka health check timed out", e);
+            return Health.down()
+                    .withDetail("broker", "timeout")
                     .build();
         } catch (Exception e) {
             log.error("Kafka health check failed", e);
             return Health.down()
                     .withDetail("broker", "disconnected")
-                    .withException(e)
                     .build();
         }
     }

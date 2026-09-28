@@ -16,7 +16,7 @@ spring:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       acks: all
-      retries: 3:
+      retries: 3
       properties:
         enable.idempotence: true
         batch.size: 16384
@@ -25,19 +25,31 @@ spring:
     listener:
       concurrency: 3
       ack-mode: manual
+  servlet:
+    multipart:
+      max-request-size: 10MB
+      max-file-size: 10MB
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
 
 server:
   port: ${SERVER_PORT:8081}
   shutdown: graceful
+  tomcat:
+    max-http-form-post-size: 10MB
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus,loggers
   endpoint:
     health:
-      show-details: always
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: graph-compiler
+      environment: ${ENVIRONMENT:dev}
 
 graph-compiler:
   kafka:
