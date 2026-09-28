@@ -1,6 +1,6 @@
 package com.archforge.graphcompiler.validation;
 
-import com.archforge.graphcompiler.schema.NodeType;
+import com.archforge.graphcompiler.exception.ValidationException;
 import com.archforge.graphcompiler.schema.ReactFlowNode;
 import com.archforge.graphcompiler.schema.ReactFlowTopology;
 import org.springframework.stereotype.Component;
@@ -11,6 +11,12 @@ import java.util.Set;
 @Component
 public class NodeTypeValidator {
 
+    private static final Set<String> VALID_TYPES = Set.of(
+            "service", "cache", "database", "queue", "load_balancer",
+            "cdn", "worker", "external", "gateway", "auth", "monitoring",
+            "function", "storage"
+    );
+
     public ValidationResult validate(ReactFlowTopology topology) {
         ValidationResult result = new ValidationResult();
 
@@ -19,7 +25,6 @@ public class NodeTypeValidator {
         }
 
         List<ReactFlowNode> nodes = topology.getNodes();
-        Set<String> validTypes = NodeType.getAllValues();
 
         for (int i = 0; i < nodes.size(); i++) {
             ReactFlowNode node = nodes.get(i);
@@ -34,15 +39,57 @@ public class NodeTypeValidator {
                 continue;
             }
 
-            try {
-                NodeType.fromValue(type);
-            } catch (Exception e) {
-                result.addError(fieldPrefix + ".type", "INVALID_NODE_TYPE",
-                        "Node '" + node.getId() + "' has unknown type '" + type + "'. Valid types: " + validTypes,
-                        ValidationError.Severity.ERROR);
+            if (!isValidType(type)) {
+                String suggestion = findClosestMatch(type);
+                String message = "Node '" + node.getId() + "' has unknown type '" + type + "'.";
+                if (suggestion != null) {
+                    message += " Did you mean '" + suggestion + "'?";
+                }
+                message += " Valid types: " + String.join(", ", VALID_TYPES);
+
+                result.addError(fieldPrefix + ".type", "INVALID_NODE_TYPE", message, ValidationError.Severity.ERROR);
             }
         }
 
         return result;
+    }
+
+    private boolean isValidType(String type) {
+        return VALID_TYPES.contains(type.toLowerCase());
+    }
+
+    private String findClosestMatch(String input) {
+        String closest = null;
+        int minDistance = Integer.MAX_VALUE;
+
+        for (String validType : VALID_TYPES) {
+            int distance = levenshteinDistance(input.toLowerCase(), validType);
+            if (distance < minDistance && distance <= 3) {
+                minDistance = distance;
+                closest = validType;
+            }
+        }
+
+        return closest;
+    }
+
+    private int levenshteinDistance(String s1, String s2) {
+        int[][] dp = new int[s1.length() + 1][s2.length() + 1];
+
+        for (int i = 0; i <= s1.length(); i++) {
+            dp[i][0] = i;
+        }
+        for (int j = 0; j <= s2.length(); j++) {
+            dp[0][j] = j;
+        }
+
+        for (int i = 1; i <= s1.length(); i++) {
+            for (int j = 1; j <= s2.length(); j++) {
+                int cost = s1.charAt(i - 1) == s2.charAt(j - 1) ? 0 : 1;
+                dp[i][j] = Math.min(Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1), dp[i - 1][j - 1] + cost);
+            }
+        }
+
+        return dp[s1.length()][s2.length()];
     }
 }

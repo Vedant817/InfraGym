@@ -1,14 +1,14 @@
 package com.archforge.graphcompiler.validation;
 
-import lombok.Data;
+import lombok.Getter;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-@Data
+@Getter
 public class ValidationResult {
 
-    private final List<ValidationError> errors = new ArrayList<>();
+    private final List<ValidationError> errors = new CopyOnWriteArrayList<>();
 
     public void addError(ValidationError error) {
         errors.add(error);
@@ -29,10 +29,6 @@ public class ValidationResult {
 
     public boolean hasWarnings() {
         return errors.stream().anyMatch(e -> e.getSeverity() == ValidationError.Severity.WARNING);
-    }
-
-    public List<ValidationError> getErrors() {
-        return new ArrayList<>(errors);
     }
 
     public List<String> getErrorMessages() {

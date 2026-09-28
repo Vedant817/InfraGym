@@ -52,6 +52,9 @@ graph-compiler:
     producer:
       retries: 3
       retry-backoff-ms: 1000
+  validation:
+    max-nodes: 500
+    max-edges: 2000
 
 logging:
   level:

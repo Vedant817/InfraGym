@@ -40,8 +40,11 @@ public class OrphanNodeDetector {
 
         for (ReactFlowNode node : nodes) {
             if (node != null && node.getId() != null && !connectedNodes.contains(node.getId())) {
+                String label = node.getData() != null && node.getData().getLabel() != null
+                        ? node.getData().getLabel()
+                        : "N/A";
                 result.addError("nodes", "ORPHAN_NODE",
-                        "Node '" + node.getId() + "' (" + node.getData().getLabel() + ") is not connected to any other node",
+                        "Node '" + node.getId() + "' (" + label + ") is not connected to any other node. Connect it to the graph or remove it.",
                         ValidationError.Severity.WARNING);
             }
         }

@@ -7,7 +7,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -20,43 +19,40 @@ public class TopologyValidator {
     private final EdgeValidator edgeValidator;
     private final CycleDetector cycleDetector;
     private final OrphanNodeDetector orphanNodeDetector;
+    private final SemanticValidator semanticValidator;
 
-    public void validate(ReactFlowTopology topology) {
+    public ValidationResult validate(ReactFlowTopology topology) {
         log.debug("Starting topology validation");
 
         ValidationResult result = new ValidationResult();
 
-        ValidationResult schemaResult = schemaValidator.validate(topology);
-        mergeResults(result, schemaResult);
+        mergeResults(result, schemaValidator.validate(topology));
+        mergeResults(result, nodeTypeValidator.validate(topology));
+        mergeResults(result, edgeValidator.validate(topology));
 
         if (result.hasErrors()) {
             throw new ValidationException(result.getErrorMessages());
         }
 
-        ValidationResult nodeTypeResult = nodeTypeValidator.validate(topology);
-        mergeResults(result, nodeTypeResult);
-
-        ValidationResult edgeResult = edgeValidator.validate(topology);
-        mergeResults(result, edgeResult);
-
-        if (result.hasErrors()) {
+        List<List<String>> cycles = cycleDetector.detectCycles(topology);
+        if (!cycles.isEmpty()) {
+            for (List<String> cycle : cycles) {
+                result.addError("topology", "CYCLE_DETECTED",
+                        "Cycle detected in topology: " + String.join(" -> ", cycle) + ". Remove the circular dependency to make the topology a valid DAG.",
+                        ValidationError.Severity.ERROR);
+            }
             throw new ValidationException(result.getErrorMessages());
         }
 
-        try {
-            cycleDetector.detectCycles(topology);
-        } catch (DAGCycleException e) {
-            throw new ValidationException(e.getMessage());
-        }
-
-        ValidationResult orphanResult = orphanNodeDetector.validate(topology);
-        mergeResults(result, orphanResult);
+        mergeResults(result, orphanNodeDetector.validate(topology));
+        mergeResults(result, semanticValidator.validate(topology));
 
         if (result.hasErrors()) {
             throw new ValidationException(result.getErrorMessages());
         }
 
         log.debug("Topology validation completed with {} warning(s)", result.getErrors().size());
+        return result;
     }
 
     private void mergeResults(ValidationResult target, ValidationResult source) {
