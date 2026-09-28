@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: canvas-session
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 5000
+
+server:
+  port: ${SERVER_PORT:8085}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+canvas:
+  session:
+    ttl-minutes: 60
+    max-users-per-session: 10
+  websocket:
+    endpoint: /ws/canvas
+    allowed-origins: "*"
+
+logging:
+  level:
+    com.archforge.canvas: INFO
