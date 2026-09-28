@@ -1,21 +1,33 @@
 package com.archforge.graphcompiler.model;
 
-import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.Value;
 
-@Data
+import java.util.Objects;
+
+@Value
 @Builder
-@NoArgsConstructor
-@AllArgsConstructor
 public class CompiledEdge {
-    private String id;
-    private String source;
-    private String target;
-    private String label;
-    private String protocol;
-    private Double bandwidthMbps;
-    private Double latencyMs;
-    private String direction;
+    String id;
+    String source;
+    String target;
+    String label;
+    String protocol;
+    Double bandwidthMbps;
+    Double latencyMs;
+    String direction;
+
+    public enum Direction {
+        UNIDIRECTIONAL,
+        BIDIRECTIONAL
+    }
+
+    public static class CompiledEdgeBuilder {
+        public CompiledEdge build() {
+            Objects.requireNonNull(source, "source must not be null");
+            Objects.requireNonNull(target, "target must not be null");
+
+            return new CompiledEdge(id, source, target, label, protocol, bandwidthMbps, latencyMs, direction);
+        }
+    }
 }

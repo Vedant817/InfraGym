@@ -1,28 +1,40 @@
 package com.archforge.graphcompiler.model;
 
 import com.archforge.graphcompiler.schema.NodeType;
-import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.Value;
 
 import java.util.*;
 
-@Data
+@Value
 @Builder
-@NoArgsConstructor
-@AllArgsConstructor
 public class CompiledNode {
-    private String id;
-    private NodeType type;
-    private String label;
-    private Set<String> dependencies;
-    private Set<String> dependents;
-    private Map<String, Object> simulationMetadata;
-    private Map<String, Integer> inputPorts;
-    private Map<String, Integer> outputPorts;
-    private Map<String, Double> capacity;
-    private String failureMode;
-    private int recoveryTimeMs;
-    private int topologicalOrder;
+    String id;
+    NodeType type;
+    String label;
+    Set<String> dependencies;
+    Set<String> dependents;
+    Map<String, Object> simulationMetadata;
+    Map<String, Integer> inputPorts;
+    Map<String, Integer> outputPorts;
+    Map<String, Double> capacity;
+    String failureMode;
+    int recoveryTimeMs;
+    int topologicalOrder;
+
+    public static class CompiledNodeBuilder {
+        public CompiledNode build() {
+            Objects.requireNonNull(id, "id must not be null");
+            if (topologicalOrder < 0) throw new IllegalArgumentException("topologicalOrder must not be negative");
+
+            dependencies = dependencies == null ? Set.of() : Collections.unmodifiableSet(new HashSet<>(dependencies));
+            dependents = dependents == null ? Set.of() : Collections.unmodifiableSet(new HashSet<>(dependents));
+            simulationMetadata = simulationMetadata == null ? Map.of() : Collections.unmodifiableMap(new HashMap<>(simulationMetadata));
+            inputPorts = inputPorts == null ? Map.of() : Collections.unmodifiableMap(new HashMap<>(inputPorts));
+            outputPorts = outputPorts == null ? Map.of() : Collections.unmodifiableMap(new HashMap<>(outputPorts));
+            capacity = capacity == null ? Map.of() : Collections.unmodifiableMap(new HashMap<>(capacity));
+
+            return new CompiledNode(id, type, label, dependencies, dependents, simulationMetadata, inputPorts, outputPorts, capacity, failureMode, recoveryTimeMs, topologicalOrder);
+        }
+    }
 }
