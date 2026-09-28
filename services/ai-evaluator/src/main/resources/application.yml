@@ -1,0 +1,46 @@
+spring:
+  application:
+    name: ai-evaluator
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      chat:
+        options:
+          model: gpt-4o
+          temperature: 0.7
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/archforge}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:postgres}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ai-evaluator-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+server:
+  port: ${SERVER_PORT:8084}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+ai:
+  kafka:
+    topics:
+      aggregated-metrics: aggregated.metrics
+      evaluation-results: evaluation.results
+  rag:
+    max-results: 5
+    similarity-threshold: 0.7
+
+logging:
+  level:
+    com.archforge.ai: INFO
