@@ -1,8 +1,9 @@
 package com.archforge.graphcompiler.event;
 
 import com.archforge.graphcompiler.schema.DesignSubmissionEvent;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -11,8 +12,7 @@ import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
 
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Component
@@ -26,7 +26,10 @@ public class DesignSubmissionConsumer {
     @Value("${graph-compiler.kafka.topics.design-submissions:design.submissions}")
     private String designSubmissionsTopic;
 
-    private final Set<String> processedSubmissions = ConcurrentHashMap.newKeySet();
+    private final Cache<String, Boolean> processedSubmissions = Caffeine.newBuilder()
+            .maximumSize(10_000)
+            .expireAfterWrite(24, TimeUnit.HOURS)
+            .build();
 
     @KafkaListener(
             topics = "${graph-compiler.kafka.topics.design-submissions:design.submissions}",
@@ -53,7 +56,7 @@ public class DesignSubmissionConsumer {
             return;
         }
 
-        if (!processedSubmissions.add(event.getSubmissionId())) {
+        if (processedSubmissions.getIfPresent(event.getSubmissionId()) != null) {
             log.info("Duplicate submission detected: {}, skipping", event.getSubmissionId());
             acknowledgment.acknowledge();
             return;
@@ -70,6 +73,7 @@ public class DesignSubmissionConsumer {
 
         try {
             compilationService.compileAndPublish(event);
+            processedSubmissions.put(event.getSubmissionId(), true);
             acknowledgment.acknowledge();
             log.info("Successfully processed design submission: {}", event.getSubmissionId());
         } catch (Exception e) {
