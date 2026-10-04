@@ -48,7 +48,11 @@ public class SemanticValidator {
         Set<String> networkIds = new LinkedHashSet<>();
 
         for (CanvasNode node : nodes) {
-            if (node == null) {
+            if (node == null || node.getId() == null) {
+                // A node with no id cannot be an entry point and cannot be reported
+                // against: SchemaValidator already flags it. Adding null here would
+                // make reachability start from a node that no edge can reference, and
+                // every other node would then be reported unreachable.
                 continue;
             }
             NodeType type = NodeType.findByValue(node.getType());
@@ -99,9 +103,29 @@ public class SemanticValidator {
     /**
      * Reports components that cannot be reached from any entry point.
      *
-     * <p>A reverse BFS from every entry point covers all of them in one pass, so a
-     * design with several entry points is handled correctly rather than analysing each
-     * in isolation.
+     * <p>A forward BFS from every entry point covers all of them in one pass, so a
+     * design with several entry points is handled correctly rather than analysing each in
+     * isolation.
+     *
+     * <p><b>Direction matters, and getting it backwards is invisible.</b> This walked the
+     * edge list <em>backwards</em> — from each node to its predecessors — so from the
+     * single entry point it could only ever reach that entry point itself. Every other
+     * node in a perfectly ordinary design was reported unreachable, and the compiler
+     * emitted five warnings for a normal three-tier architecture:
+     *
+     * <pre>
+     *   Node 'api'    cannot be reached from any entry point.
+     *   Node 'worker' cannot be reached from any entry point.
+     *   Node 'queue'  cannot be reached from any entry point.
+     *   Node 'cache'  cannot be reached from any entry point.
+     *   Node 'db'     cannot be reached from any entry point.
+     * </pre>
+     *
+     * <p>It was survivable only because these are warnings, not errors — the pipeline
+     * carried on and the simulation ran. It was still wrong. A user with a genuinely
+     * unreachable component would see the same five warnings and had no way to tell
+     * which were real, so the warning had no value: a validator that cries wolf on every
+     * design is worse than one that stays quiet.
      */
     private void warnOnUnreachableComponents(Topology topology,
                                             Set<String> entryPointIds,
@@ -111,15 +135,16 @@ public class SemanticValidator {
             return;
         }
 
-        java.util.Map<String, List<String>> upstream = new java.util.HashMap<>();
+        java.util.Map<String, List<String>> downstream = new java.util.HashMap<>();
         for (CanvasNode node : topology.getNodes()) {
             if (node != null && node.getId() != null) {
-                upstream.computeIfAbsent(node.getId(), k -> new ArrayList<>());
+                downstream.computeIfAbsent(node.getId(), k -> new ArrayList<>());
             }
         }
         for (var edge : topology.getEdges()) {
             if (edge != null && edge.getSource() != null && edge.getTarget() != null) {
-                upstream.computeIfAbsent(edge.getTarget(), k -> new ArrayList<>()).add(edge.getSource());
+                // Forward: an edge points from a caller to the component it calls.
+                downstream.computeIfAbsent(edge.getSource(), k -> new ArrayList<>()).add(edge.getTarget());
             }
         }
 
@@ -127,9 +152,9 @@ public class SemanticValidator {
         java.util.Deque<String> queue = new java.util.ArrayDeque<>(entryPointIds);
         while (!queue.isEmpty()) {
             String current = queue.poll();
-            for (String predecessor : upstream.getOrDefault(current, List.of())) {
-                if (reachable.add(predecessor)) {
-                    queue.add(predecessor);
+            for (String successor : downstream.getOrDefault(current, List.of())) {
+                if (reachable.add(successor)) {
+                    queue.add(successor);
                 }
             }
         }

@@ -12,9 +12,10 @@ import java.util.Locale;
  *
  * <p>Each constant declares, declaratively:
  * <ul>
- *   <li>{@code baselineMultiplier} — peak offered load relative to the graph's
- *       own capacity, so a scenario is meaningful for a 50 rps design and a
- *       500 000 rps design alike;</li>
+ *   <li>{@code extremeLoadMultiplier} — the scenario's most extreme offered load
+ *       relative to the graph's own capacity, so a scenario is meaningful for a
+ *       50 rps design and a 500 000 rps design alike. Above 1 for a burst, below 1
+ *       for a collapse; see {@link #getExtremeLoadMultiplier()};</li>
  *   <li>{@code targets} — which node categories the failure plan aims at, so a
  *       scenario degrades gracefully when the graph contains no such node;</li>
  *   <li>{@code description} — surfaced verbatim in the UI and fed to the AI
@@ -73,16 +74,16 @@ public enum ScenarioType {
 
     private final String value;
     private final String displayName;
-    private final double baselineMultiplier;
+    private final double extremeLoadMultiplier;
     private final double failureFraction;
     private final FailureTarget failureTarget;
     private final String description;
 
-    ScenarioType(String value, String displayName, double baselineMultiplier,
+    ScenarioType(String value, String displayName, double extremeLoadMultiplier,
                  double failureFraction, FailureTarget failureTarget, String description) {
         this.value = value;
         this.displayName = displayName;
-        this.baselineMultiplier = baselineMultiplier;
+        this.extremeLoadMultiplier = extremeLoadMultiplier;
         this.failureFraction = failureFraction;
         this.failureTarget = failureTarget;
         this.description = description;
@@ -97,9 +98,34 @@ public enum ScenarioType {
         return displayName;
     }
 
-    /** Peak offered load as a multiple of the graph's nominal capacity. */
-    public double getBaselineMultiplier() {
-        return baselineMultiplier;
+    /**
+     * The scenario's most extreme offered load, as a multiple of the graph's nominal
+     * capacity.
+     *
+     * <p><b>Extreme, not peak.</b> For a burst scenario this is the peak: a 5x spike
+     * reaches 5.0. For a collapse it is the trough: traffic falling to a tenth of
+     * baseline is a departure of 0.1, and describing that as a "peak" would make a
+     * scenario's most extreme moment its quietest. The evaluator reads this to say
+     * "this run drove the architecture to N times its sustainable rate", so it has to
+     * mean the same thing whichever direction the scenario pushes.
+     *
+     * <p>Previously named and documented as a peak, which is why every workload shape
+     * had to be bent to fit it: a collapse profile starting at 1.0x and falling to 0.1x
+     * has a true peak of 1.0x and could never satisfy a declared peak of 0.1x. The
+     * generator's profiles were the casualty of the name, not the reverse.
+     */
+    public double getExtremeLoadMultiplier() {
+        return extremeLoadMultiplier;
+    }
+
+    /**
+     * Whether the extreme is a burst above baseline rather than a collapse below it.
+     *
+     * <p>So a caller saying "drive it to N times capacity" and one saying "drop it to N
+     * times capacity" can share one code path without branching on the sign.
+     */
+    public boolean isBurst() {
+        return extremeLoadMultiplier > 1.0;
     }
 
     /** Fraction of matching nodes the failure plan takes down, in [0, 1]. */

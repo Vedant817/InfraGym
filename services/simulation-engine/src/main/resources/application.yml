@@ -1,56 +1,116 @@
 spring:
   application:
     name: simulation-engine
+
+  # Only the bootstrap list and the group id live here. Producer, consumer and
+  # container settings are defined once in the shared KafkaClientConfig, because a
+  # service-local factory bean silently overrides every key below it -- which is how
+  # the previous version of this file said `auto-offset-reset: earliest` while the
+  # code did `latest`, and declared `acks: 1` while a sibling service did `acks: all`.
   kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
     consumer:
-      group-id: simulation-engine-group
-      auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      properties:
-        spring.json.trusted.packages: "com.archforge.*"
-        max.poll.records: 100
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
-      acks: 1
-      properties:
-        batch.size: 16384
-        linger.ms: 1
-        compression.type: snappy
+      group-id: ${KAFKA_GROUP_ID:simulation-engine-group}
+
+  lifecycle:
+    timeout-per-shutdown-phase: 90s
 
 server:
   port: ${SERVER_PORT:8082}
+  shutdown: graceful
+  tomcat:
+    threads:
+      max: 60
+
+archforge:
+  kafka:
+    enabled: ${KAFKA_ENABLED:true}
+    listener:
+      concurrency: ${KAFKA_CONCURRENCY:2}
+    consumer:
+      # `earliest`, not `latest`: with `latest`, anything published before this
+      # group's first poll is discarded with no trace -- which is exactly the window a
+      # freshly compiled design falls into on a cold start.
+      auto-offset-reset: earliest
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:10}
+      # A run is handed to the worker pool and the handler returns immediately, so the
+      # consumer is never the bottleneck. Raised anyway so a backlog drained with
+      # CallerRunsPolicy cannot evict the consumer.
+      max-poll-interval-ms: 900000
+      session-timeout-ms: 45000
+    producer:
+      max-request-size: ${KAFKA_MAX_REQUEST_SIZE:2097152}
+    error-handler:
+      max-attempts: 4
+      initial-interval-ms: 500
+      multiplier: 2.0
+      max-interval-ms: 10000
+
+  topics:
+    simulation-tasks: ${TOPIC_SIMULATION_TASKS:simulation.tasks}
+    simulation-telemetry: ${TOPIC_SIMULATION_TELEMETRY:simulation.telemetry}
+    simulation-lifecycle: ${TOPIC_SIMULATION_LIFECYCLE:simulation.lifecycle}
+    submission-lifecycle: ${TOPIC_SUBMISSION_LIFECYCLE:submission.lifecycle}
+    simulation-tasks-dlt: ${TOPIC_SIMULATION_TASKS_DLT:simulation.tasks.dlt}
+
+  simulation:
+    # Defaults only. Every one of these is a fallback for a task that does not
+    # specify its own value; the compiler sends explicit values on each record.
+    default-duration-seconds: ${SIMULATION_DURATION_SECONDS:60}
+    default-tick-millis: ${SIMULATION_TICK_MILLIS:1000}
+    # Bounds a record that claims an absurd run length. At a 100 ms tick a week-long
+    # run is 6 048 000 ticks per node; nothing else in the process would stop it.
+    max-ticks-per-run: ${SIMULATION_MAX_TICKS:20000}
+    max-nodes: ${MAX_NODES:500}
+    telemetry-buffer-size: ${TELEMETRY_BUFFER_SIZE:200000}
+    telemetry-batch-size: ${TELEMETRY_BATCH_SIZE:500}
+    worker-threads: ${SIMULATION_WORKER_THREADS:2}
+    worker-queue-capacity: ${SIMULATION_WORKER_QUEUE:8}
+    retained-runs: ${SIMULATION_RETAINED_RUNS:200}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        # prometheus is exposed but needs micrometer-registry-prometheus to serve it;
+        # without the registry the endpoint 404s, which reads as a broken exporter.
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: when-authorized
+      probes:
+        enabled: true
+      group:
+        # Both groups must be reachable without credentials: Kubernetes sends none, and
+        # a rule requiring ROLE_ADMIN here makes the pod restart in a loop forever.
+        readiness:
+          include: readinessState,kafka,diskSpace
+        liveness:
+          include: livenessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:dev}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        simulation.run.duration: true
+      slo:
+        simulation.run.duration: 100ms,500ms,1s,5s,30s,1m
+  # Trace context only: traceId/spanId land in the log MDC, so a run can be followed
+  # across services by grepping one log line. Span *export* is deliberately not
+  # configured -- see the pom comment on zipkin-reporter-brave.
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:0.1}
 
-simulation:
-  kafka:
-    topics:
-      simulation-tasks: simulation.tasks
-      simulation-telemetry: simulation.telemetry
-  workload:
-    default-duration-seconds: 60
-    default-rps: 1000
-  scenarios:
-    - NORMAL
-    - TRAFFIC_SPIKE
-    - TRAFFIC_DROP
-    - SERVICE_FAILURE
-    - DATABASE_OVERLOAD
-    - CACHE_FAILURE
-    - KAFKA_CONSUMER_FAILURE
-    - NETWORK_DEGRADATION
-    - FLASH_SALE
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
 
 logging:
   level:
-    com.archforge.simulation: INFO
+    root: ${LOG_LEVEL:INFO}
+    com.archforge.simulation: ${APP_LOG_LEVEL:INFO}

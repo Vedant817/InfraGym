@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Service logging: delegates to the shared policy in the messaging module so the
+  rolling strategy is defined once for all services. See archforge-logback.xml for why
+  SizeAndTimeBasedRollingPolicy is mandatory here.
+-->
+<configuration scan="false" debug="false">
+    <include resource="archforge-logback.xml"/>
+
+    <property name="APP_LOG_FILE" value="simulation-engine"/>
+
+    <appender name="ASYNC_STDOUT" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>4096</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
+        <appender-ref ref="CONSOLE"/>
+    </appender>
+
+    <springProfile name="!prod">
+        <root level="${LOG_LEVEL:-INFO}">
+            <appender-ref ref="ASYNC_STDOUT"/>
+            <appender-ref ref="ASYNC_FILE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="prod">
+        <!-- stdout only: a container log collector owns the lifecycle of its output. -->
+        <root level="${LOG_LEVEL:-INFO}">
+            <appender-ref ref="ASYNC_STDOUT"/>
+        </root>
+    </springProfile>
+
+    <!--
+      The engine is quiet at DEBUG by default because a full run emits one sample per
+      component per metric per tick; DEBUG would write megabytes per simulation and
+      obscure the lifecycle lines an operator actually reads. The simulator's own
+      "node declares no latency" notices are the reason to turn it on when diagnosing a
+      graph that reports suspicious figures.
+    -->
+    <logger name="com.archforge.simulation" level="${APP_LOG_LEVEL:-INFO}"/>
+    <logger name="com.archforge.simulation.engine.DiscreteEventSimulator"
+            level="${SIMULATOR_LOG_LEVEL:-INFO}"/>
+</configuration>
