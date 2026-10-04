@@ -147,6 +147,11 @@ public class SimulationRunController {
         body.put("totalOffered", round(outcome.totalOffered()));
         body.put("totalServed", round(outcome.totalServed()));
         body.put("totalFailed", round(outcome.totalFailed()));
+        // The third term of the identity, and without it the completion rate above is not
+        // explainable: a run can be short of 100% with nothing failed, because the missing
+        // requests are still queued behind a consumer that cannot keep up.
+        body.put("residualBacklog", round(outcome.residualBacklog()));
+        body.put("reconciles", outcome.reconciles());
         body.put("wallClockMs", outcome.wallClock().toMillis());
         body.put("startedAt", outcome.startedAt().toString());
         body.put("completedAt", outcome.completedAt().toString());
@@ -215,6 +220,10 @@ public class SimulationRunController {
         body.put("sampleCount", report.sampleCount());
         body.put("unroutedBypassRequests", round(report.unroutedBypassRequests()));
         body.put("declaredRateRps", round(report.declaredRateRps()));
+        // Both, because they differ for exactly the component where the difference is the
+        // whole story: a queue declares 10 000 messages/second and can only ever take as
+        // many as its consumer reads, which is the number a reader needs to size it.
+        body.put("observedCeilingRps", round(report.observedCeilingRps()));
         return body;
     }
 

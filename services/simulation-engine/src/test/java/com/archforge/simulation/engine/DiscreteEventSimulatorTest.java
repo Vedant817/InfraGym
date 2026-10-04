@@ -842,6 +842,149 @@ class DiscreteEventSimulatorTest {
         }
 
         @Test
+        @DisplayName("offered equals served plus failed, for a chain nothing is left unaccounted for")
+        void theThreeTotalsReconcile() {
+            // The invariant that makes the completion rate meaningful. A chain has no
+            // branches and no terminal backlog, so everything offered is either served at
+            // the end of the path or lost somewhere along it.
+            DiscreteEventSimulator simulator = simulator(TestGraphs.deepChain(), flat(100, 20), 100);
+            simulator.run(20, new Recorder());
+
+            assertThat(simulator.totalServed() + simulator.totalFailed())
+                    .as("offered %d, served %d, failed %d -- a residual here is requests "
+                            + "accounted for nowhere",
+                            Math.round(simulator.totalOffered()),
+                            Math.round(simulator.totalServed()),
+                            Math.round(simulator.totalFailed()))
+                    .isCloseTo(simulator.totalOffered(),
+                            org.assertj.core.data.Offset.offset(2.0));
+        }
+
+        @Test
+        @DisplayName("a mid-graph component shedding load is counted, not forgotten")
+        void midGraphFailuresAreCounted() {
+            // Found by running the pipeline rather than by reading it: a live flash-sale
+            // run reported 17260 offered / 15607 served / **0 failed**. The missing 1653
+            // had been rejected by a component in the middle of the graph, and the totals
+            // only ever accumulated failures at the terminals — so a request that died at
+            // a non-terminal node appeared to have neither succeeded nor failed.
+            CompiledGraph graph = TestGraphs.graph("Thin middle tier",
+                    List.of(TestGraphs.loadBalancer("lb"),
+                            TestGraphs.builder("api", NodeType.SERVICE, 0)
+                                    .capacity("requestsPerSecond", 50)
+                                    .latency("p50Ms", 20)
+                                    .build(),
+                            TestGraphs.database("db")),
+                    List.of(TestGraphs.edge("lb", "api"), TestGraphs.edge("api", "db")));
+
+            // Offer ten times what the middle tier can take.
+            DiscreteEventSimulator simulator = simulator(graph, flat(500, 20), 500);
+            simulator.run(20, new Recorder());
+
+            assertThat(simulator.totalFailed())
+                    .as("the shed load is real work the caller did not get")
+                    .isGreaterThan(0);
+            assertThat(simulator.totalServed() + simulator.totalFailed())
+                    .isCloseTo(simulator.totalOffered(),
+                            org.assertj.core.data.Offset.offset(2.0));
+        }
+
+        @Test
+        @DisplayName("a failing mid-graph component is counted as failing")
+        void midGraphOutageIsCounted() {
+            long ticks = 20;
+            List<FailureInjector.Failure> failures = List.of(new FailureInjector.Failure(
+                    "service_failure", "api", "api", "service-down", 5, (int) ticks,
+                    java.util.Set.of("db"), 1));
+
+            DiscreteEventSimulator simulator =
+                    simulator(TestGraphs.deepChain(), flat(200, ticks), 200, failures);
+            simulator.run(ticks, new Recorder());
+
+            assertThat(simulator.totalFailed())
+                    .as("a service that is down for 15 of 20 ticks rejects everything offered")
+                    .isGreaterThan(0);
+            assertThat(simulator.states().get("api").wasFailureTarget()).isTrue();
+        }
+
+        @Test
+        @DisplayName("offered equals served plus failed plus whatever is still queued")
+        void everyRequestIsAccountedFor() {
+            // The identity the completion rate rests on. Found by running the pipeline: a
+            // live flash-sale run reported 17260 offered / 15607 served / 0 failed, a
+            // completion rate of 90.4% with no failure to explain the missing 9.6%. The
+            // 1653 requests were queued behind a consumer that could take 100 rps -- not
+            // lost, and not served, and previously reported as neither.
+            //
+            // Asserted across every shape the tests here can build, because the three
+            // totals are accumulated in three different places (roots, terminals,
+            // everywhere) and each pair of them was wrong at least once.
+            List<CompiledGraph> shapes = List.of(
+                    TestGraphs.deepChain(),
+                    TestGraphs.readThroughCache(),
+                    TestGraphs.withoutCache(),
+                    TestGraphs.queued(),
+                    TestGraphs.singleNode());
+
+            for (CompiledGraph shape : shapes) {
+                DiscreteEventSimulator simulator = simulator(shape, flat(400, 40), 400);
+                simulator.run(40, new Recorder());
+
+                double offered = simulator.totalOffered();
+                double accounted = simulator.totalServed() + simulator.totalFailed()
+                        + simulator.residualBacklog();
+
+                assertThat(accounted)
+                        .as("%s: offered %.0f, served %.0f, failed %.0f, queued %.0f",
+                                shape.getName(), offered, simulator.totalServed(),
+                                simulator.totalFailed(), simulator.residualBacklog())
+                        .isCloseTo(offered, within(offered * 0.02 + 1.0));
+            }
+        }
+
+        @Test
+        @DisplayName("a slow consumer leaves a backlog rather than losing requests")
+        void slowConsumerQueuesRatherThanLoses() {
+            // queued() is lb -> api -> queue -> worker, with a worker rated at 100 tasks/s.
+            // 500 rps is past the worker's ceiling and inside the api's 1000, so the queue
+            // backs up rather than the api rejecting.
+            DiscreteEventSimulator simulator = simulator(TestGraphs.queued(), flat(500, 30), 500);
+            simulator.run(30, new Recorder());
+
+            assertThat(simulator.totalFailed()).as("nothing was rejected").isZero();
+            assertThat(simulator.residualBacklog())
+                    .as("the consumer could not keep up, and the difference is visible as lag")
+                    .isGreaterThan(0);
+            assertThat(simulator.states().get("q").getMaxQueueAgeMs())
+                    .as("37 seconds of lag was measured on a live run and reported nowhere")
+                    .isGreaterThan(0);
+        }
+
+        @Test
+        @DisplayName("a saturation finding names the rate the component was actually held to")
+        void saturationFindingNamesTheRealCeiling() {
+            // A queue's limit is its consumer's drain rate, not its own declared enqueue
+            // rate. Quoting the declared rate produced "briefly exceeded its declared
+            // ceiling of 10000.0 rps" on a queue that peaked at 100 rps with 2546 messages
+            // backed up -- a claim about a number it never approached, on the one finding a
+            // reader acts on.
+            DiscreteEventSimulator simulator = simulator(TestGraphs.queued(), flat(2000, 30), 2000);
+            simulator.run(30, new Recorder());
+
+            NodeReport queue = NodeReport.from(simulator.states().get("q"));
+            NodeCharacteristics workerRate = NodeCharacteristics.of(TestGraphs.worker("w"));
+
+            assertThat(queue.saturated()).isTrue();
+            assertThat(queue.findings().get("saturated").toString())
+                    .as("names the drain rate, not the 10000 rps the queue could enqueue at")
+                    .contains(String.valueOf(Math.round(workerRate.sustainedRateRps())))
+                    .doesNotContain("10000");
+            assertThat(queue.findings())
+                    .as("a queue with a backlog says so, and says what is limiting it")
+                    .containsKey("backlog");
+        }
+
+        @Test
         @DisplayName("a healthy run completes everything it offered")
         void healthyRunCompletes() {
             // deepChain ends in an EXTERNAL node rated at 100 rps, which is the whole

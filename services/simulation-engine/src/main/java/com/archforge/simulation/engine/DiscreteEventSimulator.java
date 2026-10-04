@@ -283,9 +283,29 @@ public class DiscreteEventSimulator {
         return totalServed;
     }
 
-    /** Requests that failed at a terminal component, over the whole run. */
+    /** Requests lost at any component, over the whole run. */
     public double totalFailed() {
         return totalFailed;
+    }
+
+    /**
+     * Requests still sitting in a queue when the run ended.
+     *
+     * <p>The third term of the accounting identity, and the reason a completion rate can
+     * fall short of 100% without anything having failed:
+     *
+     * <pre>
+     *   offered = served + failed + residual backlog
+     * </pre>
+     *
+     * <p>Without it the difference is unexplainable. A live flash-sale run reported 17 260
+     * offered, 15 607 served and 0 failed — a completion rate of 90.4% with no failure
+     * anywhere to account for the missing 9.6%. The 1 653 requests were still queued
+     * behind a consumer that could take 100 rps. That is consumer lag, the single most
+     * important number in a queueing design, and the run summary was hiding it.
+     */
+    public double residualBacklog() {
+        return states.values().stream().mapToDouble(ComponentState::residualBacklog).sum();
     }
 
     /**
@@ -372,6 +392,7 @@ public class DiscreteEventSimulator {
 
         double upstreamPathMs = worstIncomingPathMs(node);
         double serviceable = serviceableThisTick(node, traits);
+        state.observeCeilingRps(serviceable / tickSeconds);
         double served;
         double failedThisTick;
         double backlog;
@@ -411,9 +432,18 @@ public class DiscreteEventSimulator {
         // silently starves every downstream component.
         state.setLastServedRps(served / tickSeconds);
 
+        // A cache's misses are what continue downstream and its hits are what complete
+        // here, and both come from one draw. Taking it twice -- once for the forwarded
+        // volume, once as a coin flip for the hit-rate statistic -- described two
+        // different ticks and left the two figures unable to sum to the served volume.
+        double missFraction = traits.type() == com.archforge.contracts.canvas.NodeType.CACHE
+                ? sampledMissFraction(traits)
+                : 0.0;
+        double cacheHits = recordCacheOutcome(node, state, traits, arrivalCount, missFraction);
+
         // Divided across downstream branches, so a fan-out conserves the request count
         // instead of replicating it. See downstreamShare for why.
-        double bypassRps = recordBypass(node, state, traits, served)
+        double bypassRps = recordBypass(node, state, traits, served, missFraction)
                 * downstreamShare(node);
         double latencyMs = pathLatency(state, traits, upstreamPathMs, served);
 
@@ -435,7 +465,6 @@ public class DiscreteEventSimulator {
             state.setLastErrorRate(arrivalCount > 0 ? failedThisTick / arrivalCount : 0);
         }
 
-        recordCacheOutcome(node, state, traits, arrivalCount);
         state.recordLatency(latencyMs);
         state.accumulateTick(served, arrivalCount, failedThisTick,
                 state.getLastServedRps(), state.getLastErrorRate(), state.getLastUtilization());
@@ -449,9 +478,28 @@ public class DiscreteEventSimulator {
             totalOffered += arrivalCount;
         }
         if (isTerminal(node)) {
+            // A request completes where it has nowhere left to go, so served belongs at
+            // the terminals.
             totalServed += served;
-            totalFailed += failedThisTick;
+        } else if (traits.type() == com.archforge.contracts.canvas.NodeType.CACHE) {
+            // A cache hit is a completed request too. It is answered in memory and never
+            // reaches the store behind it, so counting only the terminals omitted every
+            // request the cache did its job on: a read-through chain offered 16 000 and
+            // reported 3 280 served — a 20% completion rate, with nothing failed and
+            // nothing queued to explain it. The cache was working perfectly.
+            totalServed += cacheHits;
         }
+        // Failures are counted at *every* node, not only the terminals. A component that
+        // sheds load or fails stops a request there and it never reaches a terminal, so
+        // accumulating only at the boundaries reported a run with 17 260 requests offered,
+        // 15 607 served and **zero** failures — the missing 1 653 having been rejected
+        // somewhere in the middle of the graph and then forgotten.
+        //
+        // No double counting: a request lost at one node was never delivered to the next,
+        // so it cannot also be lost further along. The three totals now reconcile as
+        // offered = served + failed + whatever is still sitting in a backlog when the run
+        // ends, and the residual is the only unaccounted part.
+        totalFailed += failedThisTick;
 
         publish(node, state, tick, observer);
     }
@@ -497,11 +545,20 @@ public class DiscreteEventSimulator {
      * <p>For most components this is what they accepted. For a cache it is only the
      * misses, because the hits were answered in memory. For a failing cache it is
      * everything, because nothing was answered.
+     *
+     * <p>A cache's miss fraction is drawn here, once, and reused by
+     * {@link #recordCacheOutcome}. It used to be drawn twice — once for the forwarded
+     * volume and again as a coin flip for the hit-rate statistic — so the published hit
+     * rate and the load actually put on the store described two different ticks. Worse,
+     * the two could not be reconciled at all: a run offered 16 000 requests through a
+     * read-through cache and reported 16 880 served, because the hit count was rounded up
+     * to whole lookups per tick independently of the volume that was forwarded.
      */
     private double recordBypass(CompiledNode node,
                                 ComponentState state,
                                 NodeCharacteristics traits,
-                                double served) {
+                                double served,
+                                double missFraction) {
         if (state.isFailing()) {
             if (!traits.passesThroughOnFailure()) {
                 return 0;
@@ -513,7 +570,7 @@ public class DiscreteEventSimulator {
             return state.getLastOfferedRps();
         }
         if (traits.type() == com.archforge.contracts.canvas.NodeType.CACHE) {
-            double misses = served * (sampledMissFraction(traits));
+            double misses = served * missFraction;
             if (outgoing.getOrDefault(node.getId(), List.of()).isEmpty()) {
                 state.setUnroutedBypassRequests(state.getUnroutedBypassRequests() + misses);
             }
@@ -606,20 +663,36 @@ public class DiscreteEventSimulator {
         return Math.max(0, Math.min(1, perturbed));
     }
 
-    private void recordCacheOutcome(CompiledNode node,
-                                    ComponentState state,
-                                    NodeCharacteristics traits,
-                                    double offered) {
+    /**
+     * Books this tick's cache lookups and returns the volume answered from memory.
+     *
+     * <p>The returned figure is what the run's {@code served} total credits to the cache:
+     * a hit is a completed request, and it never reaches anything downstream. Derived from
+     * the same miss fraction that produced the forwarded volume, so hits and misses
+     * partition the cache's served volume exactly and the three totals reconcile.
+     *
+     * <p>The <em>statistic</em> is deliberately a separate whole-number count of lookups,
+     * because a cache counts operations and the published hit rate is a ratio of them.
+     * Using one number for both let rounding drift the served total above what was
+     * offered: a run offered 16 000 requests through a read-through cache and reported
+     * 16 880 served.
+     */
+    private double recordCacheOutcome(CompiledNode node,
+                                      ComponentState state,
+                                      NodeCharacteristics traits,
+                                      double offered,
+                                      double missFraction) {
         if (traits.type() != com.archforge.contracts.canvas.NodeType.CACHE) {
-            return;
+            return 0;
         }
         if (state.isFailing()) {
-            // Every lookup missed: the cache answered none of them.
+            // Every lookup missed: the cache answered none of them, so nothing completed
+            // here and the whole volume goes to the store behind it.
             state.recordCacheLookup(lookups(offered), false);
-            return;
+            return 0;
         }
-        boolean hit = offered > 0 && random.nextDouble() >= (1.0 - traits.hitRate());
-        state.recordCacheLookup(lookups(offered), hit);
+        state.recordCacheLookup(lookups(offered), missFraction <= 0.5);
+        return offered * (1.0 - missFraction);
     }
 
     /**

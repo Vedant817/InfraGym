@@ -196,11 +196,14 @@ public class SimulationRunService {
             sample.stop(meterRegistry.timer("simulation.run.duration", "outcome", "completed"));
 
             log.info("Simulation {} completed: {} ticks, {} nodes, worst P99 {} ms, "
-                            + "{} offered / {} served / {} failed, wall clock {} ms{}",
+                            + "{} offered / {} served / {} failed / {} still queued, "
+                            + "wall clock {} ms{}",
                     task.simulationId(), ticks, outcome.nodeReports().size(),
                     Math.round(outcome.worstNodeP99Ms()),
                     Math.round(outcome.totalOffered()), Math.round(outcome.totalServed()),
-                    Math.round(outcome.totalFailed()), outcome.wallClock().toMillis(),
+                    Math.round(outcome.totalFailed()),
+                    Math.round(outcome.residualBacklog()),
+                    outcome.wallClock().toMillis(),
                     totalDropped > 0 ? ", " + totalDropped + " samples dropped" : "");
             return outcome;
 
@@ -336,6 +339,7 @@ public class SimulationRunService {
                 task.scenarioType(), task.seed(), nominal, ticks, task.tickMillis(),
                 reports, failures, warnings,
                 simulator.totalOffered(), simulator.totalServed(), simulator.totalFailed(),
+                simulator.residualBacklog(),
                 task.graph(), workload, startedAt, Instant.now());
     }
 

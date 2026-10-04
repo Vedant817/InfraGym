@@ -96,7 +96,18 @@ public record SimulationSummaryEvent(
         }
     }
 
-    /** Architecture-wide figures. */
+    /**
+     * Architecture-wide figures.
+     *
+     * <p>The three request totals are the accounting identity and are named for it:
+     * {@code totalOffered == totalServed + totalErrors + backlogedRequests}. The field was
+     * previously called {@code droppedRequests} and carried
+     * {@code offered - served - errors}, which is the residual backlog — so a run with
+     * 1 653 requests still queued behind a slow consumer published them as 1 653
+     * <em>dropped</em> requests. Nothing was dropped; a reader told otherwise goes looking
+     * for packet loss in a system that queued them. Renamed rather than added, because no
+     * consumer reads it yet and the old name is worse than no name.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Totals(
             double p50LatencyMs,
@@ -108,7 +119,7 @@ public record SimulationSummaryEvent(
             double offeredThroughputRps,
             double totalRequests,
             double totalErrors,
-            double droppedRequests,
+            double backlogedRequests,
             int saturatedNodeCount,
             double meanRecoveryTimeMs) {
 

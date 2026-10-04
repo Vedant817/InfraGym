@@ -136,6 +136,9 @@ public class ComponentState {
     private double peakServedRps;
     private double peakErrorRate;
     private double peakUtilization;
+
+    /** Highest per-second volume this component was actually able to take, per tick. */
+    private double peakServiceableRps;
     private double peakQueueDepth;
     private double maxPathLatencyMs;
 
@@ -199,6 +202,25 @@ public class ComponentState {
         maxQueueAgeMs = Math.max(maxQueueAgeMs, queueAgeMs);
         if (utilization >= 1.0) {
             saturatedTicks++;
+        }
+    }
+
+    /**
+     * Records the ceiling this component was actually measured against, in requests per
+     * second, for the tick just evaluated.
+     *
+     * <p>Not the declared rate. For most components they are the same, but a queue's is
+     * not: it is bounded by <em>its consumer's</em> drain rate, because a broker accepts
+     * messages far faster than any consumer group reads them. A live flash-sale run
+     * therefore produced the finding "briefly exceeded its declared ceiling of 10000.0
+     * rps" for a queue whose peak throughput was 100 rps and whose backlog reached 2546
+     * messages — a claim about a number the component never approached, on the one
+     * finding a reader would act on. Naming the drain rate instead makes it true:
+     * "could only take 100 rps".
+     */
+    public void observeCeilingRps(double ceilingRps) {
+        if (ceilingRps > peakServiceableRps) {
+            peakServiceableRps = ceilingRps;
         }
     }
 
@@ -287,6 +309,16 @@ public class ComponentState {
 
     public double failedTotal() {
         return failedTotal;
+    }
+
+    /** Work still sitting in this component's queue when the run ended. */
+    public double residualBacklog() {
+        return queueDepth;
+    }
+
+    /** Highest per-second volume this component was actually able to take. */
+    public double peakServiceableRps() {
+        return peakServiceableRps;
     }
 
     public long observedTicks() {

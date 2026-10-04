@@ -40,6 +40,9 @@ import java.util.Map;
  * @param sampleCount         latency samples the percentiles are computed from
  * @param unroutedBypassRequests load forwarded to no downstream component
  * @param declaredRateRps     capacity the compiler declared, for comparison
+ * @param observedCeilingRps  highest rate this component could actually take per second;
+ *                            differs from {@code declaredRateRps} for a queue, which is
+ *                            bounded by its consumer's drain rate
  */
 public record NodeReport(
         String nodeId,
@@ -65,7 +68,8 @@ public record NodeReport(
         int failureTicks,
         long sampleCount,
         double unroutedBypassRequests,
-        double declaredRateRps) {
+        double declaredRateRps,
+        double observedCeilingRps) {
 
     public static NodeReport from(ComponentState state) {
         Distribution latency = state.latencyDistribution();
@@ -94,7 +98,8 @@ public record NodeReport(
                 state.getFailureTicks(),
                 state.latencySampleCount(),
                 state.getUnroutedBypassRequests(),
-                traits.sustainedRateRps());
+                traits.sustainedRateRps(),
+                state.peakServiceableRps());
     }
 
     /**
@@ -107,14 +112,17 @@ public record NodeReport(
     public Map<String, Object> findings() {
         Map<String, Object> findings = new java.util.LinkedHashMap<>();
         if (persistentlySaturated) {
-            findings.put("saturated", "at its declared ceiling of "
-                    + declaredRateRps + " rps for more than half the run");
+            findings.put("saturated", "at its ceiling of " + ceiling()
+                    + " rps for more than half the run");
         } else if (saturated) {
-            findings.put("saturated", "briefly exceeded its declared ceiling of "
-                    + declaredRateRps + " rps");
+            findings.put("saturated", "briefly exceeded its ceiling of " + ceiling() + " rps");
         }
         if (avgErrorRate > 0.01) {
             findings.put("error_rate", "failed " + Math.round(avgErrorRate * 100) + "% of requests");
+        }
+        if (peakQueueDepth > 0) {
+            findings.put("backlog", "up to " + Math.round(peakQueueDepth)
+                    + " requests queued behind a consumer taking " + ceiling() + " rps");
         }
         if (maxQueueAgeMs > 1_000) {
             findings.put("queue_age_ms", "oldest queued item reached " + Math.round(maxQueueAgeMs) + " ms old");
@@ -131,5 +139,20 @@ public record NodeReport(
             findings.put("recovery", "recovered after " + Math.round(recoveryTimeMs) + " ms");
         }
         return findings;
+    }
+
+    /**
+     * The ceiling to quote in a finding, in requests per second.
+     *
+     * <p>The rate the component was actually measured against, not its declared one. They
+     * agree for an ordinary component and disagree for a queue, whose limit is its
+     * consumer's drain rate — so quoting the declared rate produced "exceeded its declared
+     * ceiling of 10000 rps" on a queue that peaked at 100 rps with 2 546 messages backed
+     * up behind it. A finding naming a number the component never approached is worse than
+     * no finding, because it is the one a reader acts on.
+     */
+    private String ceiling() {
+        double observed = observedCeilingRps > 0 ? observedCeilingRps : declaredRateRps;
+        return String.valueOf(Math.round(observed));
     }
 }

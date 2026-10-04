@@ -32,7 +32,8 @@ import java.util.List;
  * @param warnings        routing and configuration problems found while running
  * @param totalOffered    requests offered at the entry points
  * @param totalServed     requests that reached a terminal component
- * @param totalFailed     requests that failed at a terminal component
+ * @param totalFailed     requests lost at any component, mid-graph included
+ * @param residualBacklog requests still queued when the run ended
  * @param graph           the DAG that was simulated
  * @param workload        the phases that were offered
  * @param startedAt       wall-clock start
@@ -53,6 +54,7 @@ public record SimulationOutcome(
         double totalOffered,
         double totalServed,
         double totalFailed,
+        double residualBacklog,
         CompiledGraph graph,
         WorkloadProfile workload,
         Instant startedAt,
@@ -84,11 +86,23 @@ public record SimulationOutcome(
         combined.add(warning);
         return new SimulationOutcome(simulationId, submissionId, correlationId, scenario, seed,
                 nominalRps, tickCount, tickMillis, nodeReports, failures, List.copyOf(combined),
-                totalOffered, totalServed, totalFailed, graph, workload, startedAt, completedAt);
+                totalOffered, totalServed, totalFailed, residualBacklog,
+                graph, workload, startedAt, completedAt);
     }
 
     public Duration wallClock() {
         return Duration.between(startedAt, completedAt);
+    }
+
+    /**
+     * Whether offered, served, failed and queued account for every request.
+     *
+     * <p>{@code offered == served + failed + backloged} is the identity that makes the
+     * completion rate mean anything. When it does not hold, one of the three is being
+     * counted at the wrong place, and a reader has no way to tell which.
+     */
+    public boolean reconciles() {
+        return Math.abs(totalOffered - (totalServed + totalFailed + residualBacklog)) <= 1.0;
     }
 
     /**
@@ -207,7 +221,7 @@ public record SimulationOutcome(
                 tickCount > 0 ? totalOffered / (tickCount * tickMillis / 1000.0) : 0,
                 totalServed + totalFailed,
                 totalFailed,
-                totalOffered - totalServed - totalFailed,
+                residualBacklog,
                 (int) nodeReports.stream().filter(NodeReport::saturated).count(),
                 nodeReports.stream()
                         .filter(report -> report.wasFailureTarget() && report.recoveryTimeMs() >= 0)
