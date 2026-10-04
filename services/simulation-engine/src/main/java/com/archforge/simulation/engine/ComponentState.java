@@ -83,10 +83,13 @@ public class ComponentState {
      * End-to-end latency of the slowest path through this component, in milliseconds.
      *
      * <p>Accumulated along the DAG as each node is evaluated: the worst upstream path
-     * plus this link's propagation delay plus this component's service time plus its
-     * queueing delay. Reporting the worst path rather than the worst local service
-     * time is what turns "each stage is 20 ms" into "the user waits 100 ms", which is
-     * the lesson the product exists to teach.
+     * plus this link's propagation delay plus this component's service time. It does
+     * <em>not</em> include queueing delay, and that is a decision rather than an
+     * omission: backlog is reported separately as {@link #getQueueDepth()} and
+     * {@link #getQueueAgeMs()}, because it belongs to the queue in front of a component
+     * rather than to the component. Reporting the worst path rather than the worst local
+     * service time is what turns "each stage is 20 ms" into "the user waits 100 ms",
+     * which is the lesson the product exists to teach.
      */
     private double lastPathLatencyMs;
 
@@ -250,8 +253,24 @@ public class ComponentState {
         return observedTicks == 0 ? 0 : offeredTotal / observedTicks;
     }
 
+    /**
+     * Failed requests as a fraction of offered ones, over the whole run.
+     *
+     * <p>Guarded on {@code offeredTotal}, not only on {@code observedTicks}. Without it a
+     * component that was offered nothing at all yields {@code 0 / 0} — {@code NaN} — and
+     * {@code NaN} is not neutral downstream: it reaches {@code NodeReport.avgErrorRate},
+     * the summary event, and the {@code high_error_rate} finding, where
+     * {@code NaN > 0.01} is false and the finding is silently suppressed. A run reports
+     * a NaN as a metric and quietly declines to comment on it.
+     *
+     * <p>Reachable in practice: a store behind a cache declaring {@code hitRate = 1.0} is
+     * offered nothing on every tick, because the cache's miss volume is zero.
+     */
     public double averageErrorRate() {
-        return observedTicks == 0 ? 0 : failedTotal / offeredTotal;
+        if (observedTicks == 0 || offeredTotal <= 0) {
+            return 0;
+        }
+        return failedTotal / offeredTotal;
     }
 
     public double averageUtilization() {

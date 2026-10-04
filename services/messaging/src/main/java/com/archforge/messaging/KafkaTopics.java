@@ -137,7 +137,28 @@ public class KafkaTopics {
         return submissionLifecycleDlt;
     }
 
-    /** Dead-letter topic for an arbitrary source topic, honouring configuration overrides. */
+    /**
+     * Dead-letter topic for an arbitrary source topic, honouring configuration overrides.
+     *
+     * <p><b>This is the one that must never throw</b>, because it backs the
+     * {@code DeadLetterPublishingRecoverer} destination resolver. Two failure modes have to
+     * be avoided at once and they pull in opposite directions:
+     *
+     * <ul>
+     *   <li>Throwing (or returning null) aborts recovery. The offset is not committed, so
+     *       the poison record is redelivered on every poll forever — a livelock that looks
+     *       like a stuck consumer.</li>
+     *   <li>Returning the <em>source</em> topic publishes the poison record back where the
+     *       container is reading from. It fails again, dead-letters again, forever: a
+     *       self-poison loop, and the one that would look like a healthy broker.</li>
+     * </ul>
+     *
+     * <p>So an unmapped source composes {@code <source>.dlt}: not declared in
+     * {@code topics.conf}, so it may be auto-created at the broker's default partition
+     * count, but never the source itself, so nothing loops. {@link
+     * TopicNames#hasDeadLetterFor} is the query a deployment check should use to find the
+     * misconfiguration rather than waiting to trip over it.
+     */
     public String deadLetterFor(String sourceTopic) {
         if (sourceTopic == null) {
             return null;
@@ -160,6 +181,8 @@ public class KafkaTopics {
         if (submissionLifecycle.equals(sourceTopic)) {
             return submissionLifecycleDlt;
         }
-        return TopicNames.deadLetterFor(sourceTopic);
+        return TopicNames.hasDeadLetterFor(sourceTopic)
+                ? TopicNames.deadLetterFor(sourceTopic)
+                : sourceTopic + ".dlt";
     }
 }

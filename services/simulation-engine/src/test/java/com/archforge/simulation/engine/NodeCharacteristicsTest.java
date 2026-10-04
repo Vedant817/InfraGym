@@ -127,6 +127,195 @@ class NodeCharacteristicsTest {
     }
 
     @Nested
+    @DisplayName("a rate declared in bandwidth")
+    class BandwidthFallback {
+
+        /**
+         * {@code STORAGE} publishes exactly one throughput key: {@code throughputMbps}.
+         * {@code RATE_KEYS} cannot match it, so the lookup returned null and the object
+         * store resolved to the 1 rps floor. That is not one bad node — the workload
+         * generator takes the <em>minimum</em> over the bottleneck path, so a single
+         * object store pinned the entire architecture to about one request per second.
+         * Every run then offered ~1 rps and the whole DAG looked idle.
+         */
+        private static CompiledNode objectStore(double mbps) {
+            return TestGraphs.builder("s3", NodeType.STORAGE, 0)
+                    .throughput(NodeCharacteristics.THROUGHPUT_MBPS, mbps)
+                    .latency("p50Ms", 10)
+                    .build();
+        }
+
+        @Test
+        @DisplayName("an object store is rated from its declared bandwidth, not the 1 rps floor")
+        void storageIsRatedFromBandwidth() {
+            NodeCharacteristics store = NodeCharacteristics.of(objectStore(100));
+
+            assertThat(store.sustainedRateRps())
+                    .isEqualTo(100 * NodeCharacteristics.REQUESTS_PER_MBIT);
+            assertThat(store.declaresThroughput())
+                    .as("a value in different units is still a declared value, not a missing one")
+                    .isTrue();
+        }
+
+        @Test
+        @DisplayName("the bandwidth figure is preferred to the floor even when it is small")
+        void aNarrowLinkBeatsTheFloor() {
+            // 1 Mbps -> 12.5 rps, which is above the floor but 1250x below what a cache
+            // on the same edge would take. Skipping the fallback because the number looks
+            // small is how the 1 rps floor came back.
+            assertThat(NodeCharacteristics.of(objectStore(1)).sustainedRateRps()).isGreaterThan(1.0);
+        }
+
+        @Test
+        @DisplayName("the same key in the capacity map is honoured")
+        void readsCapacityToo() {
+            CompiledNode declared = TestGraphs.builder("s3", NodeType.STORAGE, 0)
+                    .capacity(NodeCharacteristics.THROUGHPUT_MBPS, 200)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(declared).sustainedRateRps())
+                    .isEqualTo(200 * NodeCharacteristics.REQUESTS_PER_MBIT);
+        }
+
+        @Test
+        @DisplayName("a rate key still wins over the bandwidth figure")
+        void rateKeyTakesPrecedence() {
+            CompiledNode both = TestGraphs.builder("s3", NodeType.STORAGE, 0)
+                    .throughput("queriesPerSecond", 900)
+                    .throughput(NodeCharacteristics.THROUGHPUT_MBPS, 10)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(both).sustainedRateRps()).isEqualTo(900);
+        }
+
+        @Test
+        @DisplayName("IOPS still caps a bandwidth-derived rate, because IOPS is the physical limit")
+        void iopsStillCaps() {
+            // 1000 Mbps implies 12 500 rps; a 200 IOPS disk cannot do that whatever the
+            // network link allows, so applying the ceiling after the fallback is what
+            // keeps the fallback from becoming a new way to overstate storage.
+            CompiledNode slowDisk = TestGraphs.builder("s3", NodeType.STORAGE, 0)
+                    .capacity("iops", 200)
+                    .throughput(NodeCharacteristics.THROUGHPUT_MBPS, 1000)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(slowDisk).sustainedRateRps()).isEqualTo(200);
+        }
+    }
+
+    @Nested
+    @DisplayName("clamping of canvas-supplied properties")
+    class Clamping {
+
+        @Test
+        @DisplayName("a hit rate above 1 is clamped, not obeyed")
+        void hitRateClampedHigh() {
+            // A user who types 90 meaning 90% otherwise produced a cache that forwards
+            // nothing and reports a 100% hit rate, leaving the database behind it
+            // apparently unloaded. The clamp inverts the whole model.
+            CompiledNode nonsense = TestGraphs.builder("cache", NodeType.CACHE, 0)
+                    .property("hitRate", 90)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(nonsense).hitRate()).isEqualTo(1.0);
+        }
+
+        @Test
+        @DisplayName("a negative hit rate is clamped to 0")
+        void hitRateClampedLow() {
+            CompiledNode nonsense = TestGraphs.builder("cache", NodeType.CACHE, 0)
+                    .property("hitRate", -5)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(nonsense).hitRate()).isEqualTo(0.0);
+        }
+
+        @Test
+        @DisplayName("a hit rate of exactly 0 or 1 is left alone")
+        void boundariesSurvive() {
+            assertThat(NodeCharacteristics.of(TestGraphs.builder("c", NodeType.CACHE, 0)
+                    .property("hitRate", 0).build()).hitRate()).isEqualTo(0.0);
+            assertThat(NodeCharacteristics.of(TestGraphs.builder("c", NodeType.CACHE, 0)
+                    .property("hitRate", 1).build()).hitRate()).isEqualTo(1.0);
+        }
+
+        @Test
+        @DisplayName("a zero timeout is floored, so a failing component is never 'faster than healthy'")
+        void timeoutFloored() {
+            CompiledNode instant = TestGraphs.builder("ext", NodeType.EXTERNAL, 0)
+                    .property("timeoutMs", 0)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(instant).timeoutMs())
+                    .isEqualTo(NodeCharacteristics.MIN_TIMEOUT_MS);
+        }
+
+        @Test
+        @DisplayName("a negative timeout is floored too")
+        void negativeTimeoutFloored() {
+            CompiledNode impossible = TestGraphs.builder("ext", NodeType.EXTERNAL, 0)
+                    .property("timeoutMs", -1000)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(impossible).timeoutMs())
+                    .isEqualTo(NodeCharacteristics.MIN_TIMEOUT_MS);
+        }
+
+        @Test
+        @DisplayName("a declared timeout above the default is preserved, not capped to it")
+        void largeTimeoutSurvives() {
+            // The clamp bounds the nonsense direction only. Clamping 60 000 down to the
+            // 5 000 default would silently shorten a deliberate long timeout.
+            CompiledNode slow = TestGraphs.builder("ext", NodeType.EXTERNAL, 0)
+                    .property("timeoutMs", 60_000)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(slow).timeoutMs()).isEqualTo(60_000);
+        }
+
+        @Test
+        @DisplayName("a NaN hit rate resolves to the floor rather than propagating")
+        void nanIsClamped() {
+            // Clamp's NaN branch: Math.min/max leave NaN alone, so without the guard a NaN
+            // typed on the canvas yields a NaN hit rate, and every miss-rate derivation
+            // downstream of it becomes NaN for the whole run.
+            CompiledNode broken = TestGraphs.builder("cache", NodeType.CACHE, 0)
+                    .property("hitRate", Double.NaN)
+                    .build();
+
+            assertThat(NodeCharacteristics.of(broken).hitRate()).isEqualTo(0.0);
+        }
+
+        @Test
+        @DisplayName("an unparseable value falls back rather than throwing")
+        void garbageFallsBack() {
+            CompiledNode garbage = TestGraphs.builder("cache", NodeType.CACHE, 0)
+                    .property("hitRate", "quite high")
+                    .build();
+
+            assertThat(NodeCharacteristics.of(garbage).hitRate())
+                    .isEqualTo(NodeCharacteristics.DEFAULT_HIT_RATE);
+        }
+
+        @Test
+        @DisplayName("every declared rate stays finite and positive across all node types")
+        void everyTypeResolves() {
+            for (NodeType type : NodeType.values()) {
+                NodeCharacteristics traits = NodeCharacteristics.of(
+                        TestGraphs.builder("n", type, 0)
+                                .throughput(NodeCharacteristics.THROUGHPUT_MBPS, 100)
+                                .property("hitRate", 0.5)
+                                .property("timeoutMs", 1000)
+                                .build());
+
+                assertThat(traits.sustainedRateRps()).as("rate %s", type).isFinite().isPositive();
+                assertThat(traits.hitRate()).as("hit rate %s", type).isBetween(0.0, 1.0);
+                assertThat(traits.timeoutMs()).as("timeout %s", type).isFinite().isPositive();
+            }
+        }
+    }
+
+    @Nested
     @DisplayName("service time")
     class ServiceTime {
 

@@ -949,6 +949,169 @@ class DiscreteEventSimulatorTest {
             assertThat(simulator.ticksExecuted()).isEqualTo(10);
         }
     }
+
+    // --------------------------------------------------------- traffic accounting
+
+    @Nested
+    @DisplayName("traffic conservation across a fan-out")
+    class FanOutConservation {
+
+        /** {@code lb -> api -> {db1, db2}}, fast enough that nothing saturates. */
+        private CompiledGraph readReplicaPair() {
+            return TestGraphs.graph("Read replicas",
+                    List.of(TestGraphs.loadBalancer("lb"), TestGraphs.service("api"),
+                            TestGraphs.database("db1"), TestGraphs.database("db2")),
+                    List.of(TestGraphs.edge("lb", "api"),
+                            TestGraphs.edge("api", "db1"),
+                            TestGraphs.edge("api", "db2")));
+        }
+
+        @Test
+        @DisplayName("a fan-out splits its load, so the sinks together see what the caller served")
+        void splitConservesTheRequestCount() {
+            // The defect: every branch was offered the upstream's *whole* throughput, so a
+            // 100 rps run reported 100 rps at each of two databases. Both figures were
+            // visible, both were wrong, and neither could be true.
+            DiscreteEventSimulator simulator = simulator(readReplicaPair(), flat(400, 30), 400);
+            simulator.run(30, new Recorder());
+
+            double apiServed = simulator.states().get("api").servedTotal();
+            double sinksServed = simulator.states().get("db1").servedTotal()
+                    + simulator.states().get("db2").servedTotal();
+
+            assertThat(sinksServed)
+                    .as("what the two branches served in total must equal what fed them")
+                    .isCloseTo(apiServed, org.assertj.core.data.Offset.offset(2.0));
+            assertThat(simulator.totalServed())
+                    .as("served can never exceed offered, which is what a completion rate assumes")
+                    .isLessThanOrEqualTo(simulator.totalOffered() + 1.0);
+        }
+
+        @Test
+        @DisplayName("the split is even, so neither replica carries the other's traffic")
+        void splitIsEven() {
+            // Equal shares is the only defensible default with no edge weights on the
+            // canvas. An uneven split would be as arbitrary, but a two-way split with one
+            // side empty is a bug rather than a choice.
+            DiscreteEventSimulator simulator = simulator(readReplicaPair(), flat(400, 30), 400);
+            simulator.run(30, new Recorder());
+
+            double one = simulator.states().get("db1").servedTotal();
+            double two = simulator.states().get("db2").servedTotal();
+
+            assertThat(one).as("neither branch may be starved").isGreaterThan(0);
+            assertThat(two).isGreaterThan(0);
+            assertThat(one)
+                    .as("a two-way fan-out with equal shares")
+                    .isCloseTo(two, org.assertj.core.data.Offset.offset(2.0));
+        }
+
+        @Test
+        @DisplayName("a cache with two stores behind it splits its misses rather than duplicating them")
+        void cacheMissesAreNotDuplicated() {
+            // The cache exemption in the share calculation did nothing for the case it was
+            // written for -- one store already receives all the misses, because a single
+            // outgoing edge is unsplit. It only changed behaviour for two stores, where it
+            // sent each of them the *full* miss stream: the cache-outage scenario's
+            // headline load figure doubled, and the completion rate went above 1.
+            CompiledGraph graph = TestGraphs.graph("Cache over two stores",
+                    List.of(TestGraphs.loadBalancer("lb"), TestGraphs.service("api"),
+                            TestGraphs.cache("cache"),
+                            TestGraphs.database("db1"), TestGraphs.database("db2")),
+                    List.of(TestGraphs.edge("lb", "api"),
+                            TestGraphs.edge("api", "cache"),
+                            TestGraphs.edge("cache", "db1"),
+                            TestGraphs.edge("cache", "db2")));
+
+            DiscreteEventSimulator simulator = simulator(graph, flat(400, 30), 400);
+            simulator.run(30, new Recorder());
+
+            double misses = simulator.states().get("db1").servedTotal()
+                    + simulator.states().get("db2").servedTotal();
+            double cacheServed = simulator.states().get("cache").servedTotal();
+
+            // Served misses must not exceed what the cache served, even though only a
+            // fraction of the cache's traffic is a miss at all.
+            assertThat(misses)
+                    .as("misses reach the stores in total once, not once per store")
+                    .isLessThanOrEqualTo(cacheServed + 1.0);
+        }
+
+        @Test
+        @DisplayName("a cache over a single store still forwards all of its misses")
+        void singleStoreCacheKeepsEveryMiss() {
+            // The counterpart, so the split cannot be 'fixed' by splitting a lone store's
+            // load in half: with one outgoing edge there is nobody to share with.
+            DiscreteEventSimulator simulator =
+                    simulator(TestGraphs.readThroughCache(), flat(1000, 30), 1000);
+            simulator.run(30, new Recorder());
+
+            double cacheServed = simulator.states().get("cache").servedTotal();
+            double dbServed = simulator.states().get("db").servedTotal();
+
+            assertThat(dbServed).isGreaterThan(0);
+            assertThat(dbServed)
+                    .as("with an 80% hit rate roughly a fifth of the cache's traffic reaches the store")
+                    .isLessThan(cacheServed);
+        }
+    }
+
+    @Nested
+    @DisplayName("where external load is counted")
+    class EntryAccounting {
+
+        /**
+         * {@code cdn -> gateway -> lb -> api -> db}: a completely normal three-tier front
+         * end, and every node in it is entry-point-typed.
+         */
+        private CompiledGraph threeTierFrontEnd() {
+            return TestGraphs.graph("Three-tier front end",
+                    List.of(
+                            TestGraphs.builder("cdn", NodeType.CDN, 0)
+                                    .capacity("requestsPerSecond", 50000)
+                                    .latency("p50Ms", 5).build(),
+                            TestGraphs.builder("gateway", NodeType.GATEWAY, 0)
+                                    .capacity("requestsPerSecond", 50000)
+                                    .latency("p50Ms", 2).build(),
+                            TestGraphs.loadBalancer("lb"),
+                            TestGraphs.service("api"),
+                            TestGraphs.database("db")),
+                    List.of(TestGraphs.edge("cdn", "gateway"),
+                            TestGraphs.edge("gateway", "lb"),
+                            TestGraphs.edge("lb", "api"),
+                            TestGraphs.edge("api", "db")));
+        }
+
+        @Test
+        @DisplayName("a three-tier front end does not count the external load three times")
+        void offeredIsNotTripleCounted() {
+            // Counting once per entry-point-typed node reported the offered load three
+            // times over on an entirely ordinary architecture. Offered load is counted
+            // where traffic structurally enters: a node nothing calls.
+            DiscreteEventSimulator simulator = simulator(threeTierFrontEnd(), flat(200, 20), 200);
+            simulator.run(20, new Recorder());
+
+            assertThat(simulator.totalOffered())
+                    .as("200 rps for 20 s is 4000 requests, once")
+                    .isCloseTo(4000.0, org.assertj.core.data.Offset.offset(2.0));
+        }
+
+        @Test
+        @DisplayName("a mid-graph entry-point-typed node does not invent load either")
+        void midGraphEntryPointIsNotASource() {
+            // The accounting uses the structural definition; routing still uses the type, so
+            // a gateway that happens to sit mid-graph takes the external offered rate rather
+            // than what reached it. The totals must still balance, which is what this
+            // checks -- and it is the reason the two definitions are documented as
+            // deliberately different.
+            DiscreteEventSimulator simulator = simulator(threeTierFrontEnd(), flat(200, 20), 200);
+            simulator.run(20, new Recorder());
+
+            assertThat(simulator.totalServed())
+                    .isLessThanOrEqualTo(simulator.totalOffered() + 2.0);
+            assertThat(simulator.totalServed()).isGreaterThan(0);
+        }
+    }
 }
 
 

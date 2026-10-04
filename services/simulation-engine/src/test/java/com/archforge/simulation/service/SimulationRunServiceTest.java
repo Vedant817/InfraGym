@@ -372,6 +372,98 @@ class SimulationRunServiceTest {
     }
 
     @Test
+    @DisplayName("the sample ceiling clamps the tick count, because the tick ceiling alone does not")
+    void sampleCeilingClampsTheTickCount() {
+        // A tick ceiling bounds nothing useful on its own. The engine emits 7-11 samples
+        // per node per tick, so the largest combination the other two settings accept --
+        // maxTicksPerRun ticks of maxNodes nodes -- asks for 500 x 20000 x ~9 = 90 million
+        // samples into a 200 000 buffer. At that point 0.22% of the trace survives and the
+        // run still reports COMPLETED, which is the worst outcome available: a confident,
+        // complete-looking report built from almost nothing.
+        properties.setMaxTicksPerRun(20_000);
+        properties.setMaxSamplesPerRun(10_000);
+        properties.setMetricsPerNode(9);
+
+        // 20 nodes x 9 metrics = 180 samples per tick, so 10 000 samples buys 55 ticks.
+        var big = TestGraphs.graph("Twenty nodes", twentyServices(), twentyEdges());
+        var workload = new com.archforge.simulation.workload.WorkloadGenerator()
+                .generate(big, com.archforge.contracts.lifecycle.ScenarioType.NORMAL, 600);
+
+        long ticks = service.tickBudget(taskFor(big, "sim-big", 600, 1000L), workload);
+
+        assertThat(ticks)
+                .as("clamped to the sample budget, not the 20000 tick ceiling")
+                .isEqualTo(10_000 / (20L * 9));
+    }
+
+    @Test
+    @DisplayName("the sample ceiling scales with the graph, so a small design is not throttled")
+    void sampleCeilingAdaptsToGraphSize() {
+        // The ceiling is derived per run from the graph's node count, so the documented
+        // 500-node worst case does not penalise a four-node design into a fraction of its
+        // intended duration.
+        properties.setMaxTicksPerRun(20_000);
+        properties.setMaxSamplesPerRun(10_000);
+        properties.setMetricsPerNode(9);
+
+        var workload = new com.archforge.simulation.workload.WorkloadGenerator()
+                .generate(TestGraphs.readThroughCache(),
+                        com.archforge.contracts.lifecycle.ScenarioType.NORMAL, 600);
+
+        // 4 nodes x 9 = 36 samples per tick, so this budget buys 277 ticks rather than the
+        // 55 a 20-node graph gets from the same 10 000 samples. The ceiling tracks the
+        // graph rather than assuming the largest one it will ever be handed.
+        assertThat(service.tickBudget(task("normal", 600), workload))
+                .as("a four-node design still gets 6.6x the ticks a twenty-node one does")
+                .isEqualTo(10_000 / (4L * 9));
+        assertThat(service.tickBudget(task("normal", 600), workload))
+                .as("and comfortably more than the 55 ticks the twenty-node graph is limited to")
+                .isGreaterThan(10_000 / (20L * 9));
+    }
+
+    @Test
+    @DisplayName("the tick budget is never zero or negative, whatever the settings")
+    void tickBudgetAlwaysPositive() {
+        properties.setMaxTicksPerRun(0);
+        properties.setMaxSamplesPerRun(0);
+        properties.setMetricsPerNode(0);
+
+        var workload = new com.archforge.simulation.workload.WorkloadGenerator()
+                .generate(TestGraphs.readThroughCache(),
+                        com.archforge.contracts.lifecycle.ScenarioType.NORMAL, 10);
+
+        assertThat(service.tickBudget(task("normal", 10), workload))
+                .as("a zero-tick run would report COMPLETED having measured nothing")
+                .isGreaterThanOrEqualTo(1);
+    }
+
+    private static List<com.archforge.contracts.graph.CompiledNode> twentyServices() {
+        var nodes = new java.util.ArrayList<com.archforge.contracts.graph.CompiledNode>();
+        nodes.add(TestGraphs.loadBalancer("lb"));
+        for (int i = 0; i < 19; i++) {
+            nodes.add(TestGraphs.service("api" + i));
+        }
+        return nodes;
+    }
+
+    private static List<com.archforge.contracts.graph.CompiledEdge> twentyEdges() {
+        var edges = new java.util.ArrayList<com.archforge.contracts.graph.CompiledEdge>();
+        edges.add(TestGraphs.edge("lb", "api0"));
+        for (int i = 0; i < 18; i++) {
+            edges.add(TestGraphs.edge("api" + i, "api" + (i + 1)));
+        }
+        return edges;
+    }
+
+    private static SimulationRequestedEvent taskFor(
+            com.archforge.contracts.graph.CompiledGraph graph,
+            String simulationId, long durationSeconds, long tickMillis) {
+        return new SimulationRequestedEvent(
+                "evt", "corr", simulationId, "sub", "user", null, graph,
+                "normal", durationSeconds, tickMillis, 42L, java.util.Map.of(), Instant.now());
+    }
+
+    @Test
     @DisplayName("a lifecycle publish failure does not lose the run")
     void lifecycleFailureDoesNotLoseTheRun() {
         // A lost COMPLETED leaves the aggregator waiting and the submission stuck at

@@ -63,9 +63,7 @@ public class KafkaTelemetrySender implements TelemetryPublisher.BatchSender {
         if (events == null || events.isEmpty()) {
             return 0;
         }
-        String topicName = topic;
         List<CompletableFuture<SendResult<String, String>>> futures = new ArrayList<>(events.size());
-        List<String> keys = new ArrayList<>(events.size());
 
         for (TelemetryEvent event : events) {
             String payload;
@@ -80,17 +78,35 @@ public class KafkaTelemetrySender implements TelemetryPublisher.BatchSender {
                 continue;
             }
             // Keyed by simulation so one run occupies one partition.
-            String key = event.simulationId();
-            keys.add(key);
-            futures.add(kafkaTemplate.send(topicName, key, payload));
+            futures.add(kafkaTemplate.send(topic, event.simulationId(), payload));
         }
 
-        int serialiseFailures = awaitAll(topicName, futures);
-        return Math.max(0, futures.size() - serialiseFailures);
+        // A sample that failed to serialise never became a future, so it is simply not in
+        // `futures` and is excluded by counting from `futures`, not from the batch.
+        //
+        // This line previously read `futures.size() - awaitAll(...) - serialiseFailures`,
+        // which subtracted the serialisation failures a second time. A 500-sample batch with
+        // 2 failures and all 498 sends acknowledged reported 496 accepted instead of 498,
+        // so the publisher counted 4 losses rather than 2, attributed them to the first four
+        // samples in the batch rather than the two that actually failed, and under-counted
+        // the published total by two — to the wrong simulation whenever a batch spanned
+        // more than one.
+        return Math.max(0, futures.size() - awaitAll(topic, futures));
     }
 
     /**
      * Awaits every send in the batch.
+     *
+     * <p><b>A timed-out batch is a failure, not a success.</b> The previous version
+     * counted only futures already {@code isCompletedExceptionally()}, which is the
+     * empty set when the timeout fires — every send is still in flight, waiting on
+     * {@code delivery.timeout.ms}. So a stalled broker returned "nothing lost" and the
+     * whole batch was accounted for as published.
+     *
+     * <p>Anything not confirmed within the timeout is now reported as unacknowledged.
+     * It may still land — {@code delivery.timeout.ms} is 120 s against this 15 s bound —
+     * so this over-reports rather than under-reports, which is the right direction for a
+     * number whose purpose is to say a trace may be incomplete.
      *
      * @return number that failed or went unacknowledged
      */
@@ -108,16 +124,16 @@ public class KafkaTelemetrySender implements TelemetryPublisher.BatchSender {
             meterRegistry.counter("telemetry.send.interrupted").increment();
             return futures.size();
         } catch (Exception e) {
-            // Timeout or a broker error. Some sends may still have landed, so count the
-            // ones known-bad rather than assuming the whole batch failed.
-            long failed = futures.stream()
-                    .filter(future -> future.isDone() && future.isCompletedExceptionally())
+            long confirmed = futures.stream()
+                    .filter(future -> future.isDone() && !future.isCompletedExceptionally())
                     .count();
-            meterRegistry.counter("telemetry.send.failed", "topic", topic).increment(failed);
-            log.warn("Telemetry batch to {}: {} of {} sends failed or unacknowledged "
-                            + "within {} s ({})", topic, failed, futures.size(),
+            int unacknowledged = futures.size() - (int) confirmed;
+            meterRegistry.counter("telemetry.send.failed", "topic", topic).increment(unacknowledged);
+            log.warn("Telemetry batch to {}: {} of {} sends were not acknowledged within {} s "
+                            + "({}). They may still be in flight, so the run's trace is treated "
+                            + "as incomplete.", unacknowledged, futures.size(),
                     AWAIT_TIMEOUT_SECONDS, e.getClass().getSimpleName());
-            return (int) failed;
+            return unacknowledged;
         }
     }
 }

@@ -4,6 +4,7 @@ import com.archforge.contracts.canvas.NodeType;
 import com.archforge.contracts.graph.CompiledEdge;
 import com.archforge.contracts.graph.CompiledGraph;
 import com.archforge.contracts.graph.CompiledNode;
+import com.archforge.simulation.engine.InvalidGraphException;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -229,8 +230,123 @@ public final class TestGraphs {
      * {@code dependencies}. A fixture with {@code dependents} but empty
      * {@code dependencies} reports a blast radius of zero for a node that plainly has
      * one, and the test asserting on it passes for the wrong reason.
+     *
+     * <p>Rank is derived from the edges for the same reason, and it is the reason a
+     * single {@link Builder#order} argument is not enough. The simulator makes one pass
+     * per tick in rank order and reads each upstream's <em>current</em> tick value; a
+     * component whose rank is not below its callers' is therefore starved for the whole
+     * run, not just the first tick — every fixture built from the registry helpers has
+     * rank 0, so without this every test would report all load offered and none served
+     * and assert against that. {@link #rankLongestPath} computes the one ordering the
+     * simulator's single pass can actually evaluate: a node's rank is one past its
+     * deepest caller, which is strictly increasing on every edge by construction. It is
+     * also what {@code DagCompiler} publishes, since both rank nodes by depth.
      */
     public static CompiledGraph graph(String name, List<CompiledNode> nodes, List<CompiledEdge> edges) {
+        Map<String, Integer> ranks = rankLongestPath(nodes, edges);
+
+        Map<String, LinkedHashSet<String>> upstream = new LinkedHashMap<>();
+        Map<String, LinkedHashSet<String>> downstream = new LinkedHashMap<>();
+        for (CompiledNode node : nodes) {
+            upstream.put(node.getId(), new LinkedHashSet<>());
+            downstream.put(node.getId(), new LinkedHashSet<>());
+        }
+        for (CompiledEdge edge : edges) {
+            downstream.computeIfAbsent(edge.getSource(), key -> new LinkedHashSet<>())
+                    .add(edge.getTarget());
+            upstream.computeIfAbsent(edge.getTarget(), key -> new LinkedHashSet<>())
+                    .add(edge.getSource());
+        }
+
+        List<CompiledNode> wired = new ArrayList<>(nodes.size());
+        for (CompiledNode node : nodes) {
+            wired.add(CompiledNode.builder()
+                    .id(node.getId())
+                    .type(node.getType())
+                    .label(node.getLabel())
+                    .dependencies(upstream.getOrDefault(node.getId(), new LinkedHashSet<>()))
+                    .dependents(downstream.getOrDefault(node.getId(), new LinkedHashSet<>()))
+                    .simulationMetadata(node.getSimulationMetadata())
+                    .capacity(node.getCapacity())
+                    .latencyProfile(node.getLatencyProfile())
+                    .throughput(node.getThroughput())
+                    .failureModes(node.getFailureModes())
+                    .recoveryTimeMs(node.getRecoveryTimeMs())
+                    .topologicalOrder(ranks.getOrDefault(node.getId(), 0))
+                    .build());
+        }
+
+        return CompiledGraph.builder()
+                .name(name)
+                .nodes(wired)
+                .edges(edges)
+                // Edges on the critical path. Equal to the deepest rank because ranks are
+                // one past the deepest caller, so a node's rank is also its longest-path
+                // distance from a root; an empty graph has none.
+                .graphMetadata(Map.of("criticalPathLength",
+                        (long) ranks.values().stream().mapToInt(Integer::intValue).max().orElse(0)))
+                .compiledAt(java.time.Instant.parse("2026-01-01T00:00:00Z"))
+                .build();
+    }
+
+    /**
+     * Ranks every node one past its deepest caller.
+     *
+     * <p>Longest path, not shortest, so that a component cannot be ranked before a
+     * caller that reaches it through a longer route — which is exactly the inversion
+     * the simulator refuses. A node reachable by no edge is a root and ranks 0. A cycle
+     * has no valid ranking; rather than loop, such a node is left at 0 so the resulting
+     * {@link InvalidGraphException} names the inversion instead of this helper hanging.
+     */
+    private static Map<String, Integer> rankLongestPath(List<CompiledNode> nodes, List<CompiledEdge> edges) {
+        Map<String, List<String>> callers = new LinkedHashMap<>();
+        for (CompiledNode node : nodes) {
+            callers.put(node.getId(), new ArrayList<>());
+        }
+        for (CompiledEdge edge : edges) {
+            callers.computeIfAbsent(edge.getTarget(), key -> new ArrayList<>()).add(edge.getSource());
+        }
+
+        Map<String, Integer> ranks = new LinkedHashMap<>();
+        for (CompiledNode node : nodes) {
+            ranks.put(node.getId(), 0);
+        }
+        // Bounded by node count: each round can only promote a node past a caller, so a
+        // graph that resolves in d rounds terminates in at most |V| rounds.
+        for (int round = 0; round <= nodes.size(); round++) {
+            boolean moved = false;
+            for (Map.Entry<String, Integer> entry : ranks.entrySet()) {
+                int rank = entry.getValue();
+                for (String caller : callers.getOrDefault(entry.getKey(), List.of())) {
+                    Integer callerRank = ranks.get(caller);
+                    if (callerRank != null && callerRank + 1 > rank) {
+                        rank = callerRank + 1;
+                        moved = true;
+                    }
+                }
+                entry.setValue(rank);
+            }
+            if (!moved) {
+                break;
+            }
+        }
+        return ranks;
+    }
+
+    /**
+     * Assembles a graph from whatever rank each node already carries, deriving only the
+     * adjacency directions.
+     *
+     * <p>The escape hatch from {@link #graph}, and it exists so a test can hand the
+     * simulator a graph the compiler could never emit. {@link #graph} repairs ranks,
+     * which is right for the ~200 tests that assert on numbers and wrong for the ones
+     * asserting the simulator <em>refuses</em>: a duplicate id, an edge to a node that
+     * is not in the list, and a rank inversion each have to arrive intact to be
+     * provable. Those graphs must be built by hand or the assertion under test is the
+     * fixture instead of the simulator.
+     */
+    public static CompiledGraph graphWithDeclaredRanks(String name, List<CompiledNode> nodes,
+                                                       List<CompiledEdge> edges) {
         Map<String, LinkedHashSet<String>> upstream = new LinkedHashMap<>();
         Map<String, LinkedHashSet<String>> downstream = new LinkedHashMap<>();
         for (CompiledNode node : nodes) {

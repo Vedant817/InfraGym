@@ -11,7 +11,9 @@ import com.archforge.messaging.KafkaTopics;
 import com.archforge.messaging.SubmissionLifecyclePublisher;
 import com.archforge.simulation.config.SimulationProperties;
 import com.archforge.simulation.engine.DiscreteEventSimulator;
+import com.archforge.simulation.engine.InvalidGraphException;
 import com.archforge.simulation.engine.NodeReport;
+import com.archforge.simulation.engine.SimulationAbandonedException;
 import com.archforge.simulation.engine.SimulationOutcome;
 import com.archforge.simulation.engine.TickObserver;
 import com.archforge.simulation.event.SimulationLifecyclePublisher;
@@ -27,7 +29,9 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -114,14 +118,29 @@ public class SimulationRunService {
         Timer.Sample sample = Timer.start(meterRegistry);
         Instant startedAt = Instant.now();
 
+        // Validate before announcing anything.
+        //
+        // Both transitions below are claims: QUEUED is what the aggregator opens a
+        // window on, and SIMULATING is what the user sees on a progress bar. Emitting
+        // them first meant a task rejected one line later had opened a window and moved
+        // a user's progress bar, then reported REJECTED / FAILED. Nothing read those
+        // claims back, so it was survivable — but a transition that describes work which
+        // then does not happen is a lie with a timestamp on it.
+        try {
+            validate(task);
+        } catch (Exception e) {
+            fail(task, e instanceof ValidationException
+                            ? SimulationStatus.REJECTED : SimulationStatus.FAILED,
+                    e.getMessage(), startedAt, sample);
+            return null;
+        }
+
         publishLifecycle(task, SimulationStatus.QUEUED, "Simulation accepted", 0, task.tickCount());
         publishSubmission(task, SubmissionStatus.SIMULATING,
                 "Simulating " + task.scenarioType().getDisplayName().toLowerCase() + " for "
                         + task.durationSeconds() + "s");
 
         try {
-            validate(task);
-
             WorkloadProfile workload = workloadGenerator.generate(
                     task.graph(), task.scenarioType(), task.durationSeconds());
             double nominal = workloadGenerator.nominalCapacityOf(task.graph());
@@ -133,42 +152,67 @@ public class SimulationRunService {
                     "Executing " + ticks + " ticks of scenario " + task.scenarioType().getValue(),
                     0, ticks);
 
+            // The budget is enforced inside the loop, not after it: checked afterwards it
+            // bounded nothing. A run that overran had already finished.
+            long deadlineNanos = System.nanoTime() + wallClockBudget.toNanos();
             DiscreteEventSimulator simulator = new DiscreteEventSimulator(
                     task.graph(), workload, failures, nominal, task.seed(), task.tickMillis());
 
-            long deadline = System.nanoTime() + wallClockBudget.toNanos();
             AtomicLong emitted = new AtomicLong();
             TickObserver observer = telemetryObserver(task, emitted);
 
-            simulator.run(ticks, observer);
-
-            if (System.nanoTime() > deadline) {
-                throw new SimulationTimeoutException(
-                        "run exceeded its " + wallClockBudget.toSeconds() + "s wall-clock budget");
+            try {
+                simulator.run(ticks, observer, deadlineNanos);
+            } catch (SimulationAbandonedException e) {
+                abandon(task, e, simulator.ticksExecuted(), emitted.get(), sample);
+                return null;
             }
 
             SimulationOutcome outcome = toOutcome(task, workload, nominal, ticks, failures,
                     simulator, emitted.get(), startedAt);
 
-            // Ordering matters: every sample must be on the broker before COMPLETED.
+            // The ordering that matters: every sample is on the broker before COMPLETED.
+            // flush() is a real barrier -- it waits for samples the drain thread is
+            // holding, not merely for an empty queue.
             telemetryPublisher.flush();
+            long totalDropped = telemetryPublisher.droppedFor(task.simulationId());
+
             publishLifecycle(task, SimulationStatus.COMPLETED,
-                    "Completed " + ticks + " ticks; worst P99 " + Math.round(outcome.worstNodeP99Ms())
-                            + " ms",
-                    ticks, ticks);
+                    "Completed " + ticks + " ticks; worst P99 "
+                            + Math.round(outcome.worstNodeP99Ms()) + " ms",
+                    ticks, ticks, completeness(emitted.get(), totalDropped));
+            releaseDropAccounting(task);
+
+            if (totalDropped > 0) {
+                // The run's own record has to say so, or a chart read from 0.2% of the
+                // trace looks exactly like a complete one.
+                outcome = outcome.withWarning(totalDropped
+                        + " of " + emitted.get() + " telemetry samples were dropped; this trace "
+                        + "is incomplete and any percentile derived from it is unreliable.");
+            }
+
             outcomeRegistry.record(outcome);
             runsCompleted.incrementAndGet();
             sample.stop(meterRegistry.timer("simulation.run.duration", "outcome", "completed"));
 
             log.info("Simulation {} completed: {} ticks, {} nodes, worst P99 {} ms, "
-                            + "{} offered / {} served / {} failed, wall clock {} ms",
+                            + "{} offered / {} served / {} failed, wall clock {} ms{}",
                     task.simulationId(), ticks, outcome.nodeReports().size(),
                     Math.round(outcome.worstNodeP99Ms()),
                     Math.round(outcome.totalOffered()), Math.round(outcome.totalServed()),
-                    Math.round(outcome.totalFailed()), outcome.wallClock().toMillis());
+                    Math.round(outcome.totalFailed()), outcome.wallClock().toMillis(),
+                    totalDropped > 0 ? ", " + totalDropped + " samples dropped" : "");
             return outcome;
 
         } catch (ValidationException e) {
+            fail(task, SimulationStatus.REJECTED, e.getMessage(), startedAt, sample);
+            return null;
+        } catch (InvalidGraphException e) {
+            // A malformed graph is a bad record, not a broken service. Reporting it as
+            // FAILED told the consumer the engine was unhealthy and left the operator
+            // chasing an infrastructure problem for a producer bug; the imported-but-
+            // unused InvalidGraphException in this file was the tell that the mapping to
+            // REJECTED was intended and never written.
             fail(task, SimulationStatus.REJECTED, e.getMessage(), startedAt, sample);
             return null;
         } catch (Exception e) {
@@ -228,10 +272,25 @@ public class SimulationRunService {
         long byDuration = task.durationSeconds() * 1000L / Math.max(1, task.tickMillis());
         long byProfile = workload.totalDurationSeconds() * 1000L / Math.max(1, task.tickMillis());
         long requested = Math.max(1, Math.min(byDuration, byProfile));
-        long ceiling = Math.max(1, properties.getMaxTicksPerRun());
+
+        long tickCeiling = Math.max(1, properties.getMaxTicksPerRun());
+
+        // A tick ceiling alone is not a bound. The engine emits 7-11 samples per node
+        // per tick, so the worst legal combination the config accepts -- maxTicksPerRun
+        // ticks of maxNodes nodes -- asks for 500 x 20000 x ~9 = 90 million samples into
+        // a 200 000 buffer. At that point 0.22% of the trace survives and the run still
+        // reports COMPLETED. Derived from the graph so the ceiling means something.
+        int nodeCount = task.graph() == null ? 1 : Math.max(1, task.graph().nodeCount());
+        long samplesPerTick = Math.max(1L, nodeCount * (long) properties.getMetricsPerNode());
+        long sampleCeiling = Math.max(1L, properties.getMaxSamplesPerRun()
+                / Math.max(1L, samplesPerTick));
+
+        long ceiling = Math.max(1, Math.min(tickCeiling, sampleCeiling));
         if (requested > ceiling) {
-            log.warn("Task {} asked for {} ticks; clamped to the {} tick ceiling",
-                    task.simulationId(), requested, ceiling);
+            log.warn("Task {} asked for {} ticks; clamped to {} (tick ceiling {}, "
+                            + "sample ceiling {} for {} nodes x ~{} metrics)",
+                    task.simulationId(), requested, ceiling, tickCeiling, sampleCeiling,
+                    nodeCount, properties.getMetricsPerNode());
         }
         return Math.min(requested, ceiling);
     }
@@ -285,34 +344,107 @@ public class SimulationRunService {
                       String message,
                       Instant startedAt,
                       Timer.Sample sample) {
+        fail(task, status, message, 0, Map.of(), startedAt, sample);
+    }
+
+    /**
+     * Terminal handling for a run that did not complete.
+     *
+     * <p>{@code ticksExecuted} and {@code details} are what distinguish an abandoned run
+     * from a rejected one. Both used to publish {@code tickCount = 0} against a
+     * populated {@code totalTicks}, so a consumer computing progress as
+     * {@code tickCount / totalTicks} divided by a known zero — and a user could not tell
+     * a run that produced 40 ticks of real data from one that produced none.
+     */
+    private void fail(SimulationRequestedEvent task,
+                      SimulationStatus status,
+                      String message,
+                      long ticksExecuted,
+                      Map<String, Object> details,
+                      Instant startedAt,
+                      Timer.Sample sample) {
         runsFailed.incrementAndGet();
         sample.stop(meterRegistry.timer("simulation.run.duration", "outcome", status.getValue()));
-        log.error("Simulation {} finished as {}: {}", task.simulationId(), status, message);
-        // Flush what was produced before the failure: a partial trace plus an explicit
-        // FAILED beats a silently absent one.
-        telemetryPublisher.flush();
-        publishLifecycle(task, status, message, 0, task.tickCount());
-        publishSubmission(task, SubmissionStatus.FAILED,
-                "Simulation failed: " + message);
+        log.error("Simulation {} finished as {} after {} tick(s): {}",
+                task.simulationId(), status, ticksExecuted, message);
+
+        // Flush what was produced before failing: a partial trace plus an explicit
+        // terminal status beats a silently absent one. The flush is bounded, so this
+        // cannot itself hang the worker.
+        //
+        // Skipped when the process has nothing outstanding at all, which is the case for a
+        // task rejected before it produced a single sample. Note the guard is
+        // process-wide, not per-run: flush() is a global barrier, so with more than one
+        // worker thread a rejected task can still wait on another run's telemetry. That is
+        // accepted rather than solved -- a per-run barrier needs per-run queues, which
+        // would cost the single-partition-per-run ordering the keying exists to provide.
+        if (telemetryPublisher.inFlightSamples() > 0) {
+            telemetryPublisher.flush();
+        }
+        releaseDropAccounting(task);
+
+        long totalTicks = Math.max(1, task.tickCount());
+        Map<String, Object> allDetails = new LinkedHashMap<>(details);
+        allDetails.put("ticksExecuted", ticksExecuted);
+        allDetails.put("ticksRequested", task.tickCount());
+
+        publishLifecycle(task, status, message, ticksExecuted, totalTicks, allDetails);
+        publishSubmission(task, SubmissionStatus.FAILED, "Simulation failed: " + message);
         outcomeRegistry.recordFailure(task.simulationId(), task.submissionId(), status, message);
+    }
+
+    /**
+     * Whether a run's trace can be trusted, and by how much it is missing.
+     *
+     * <p>Carried on the terminal lifecycle event so a consumer can tell a complete trace
+     * from a partial one <em>without</em> having to diff two topics and work it out. The
+     * aggregator needs this to avoid publishing a percentile computed from 0.2% of the
+     * samples as though it described the run.
+     */
+    private static Map<String, Object> completeness(long emitted, long dropped) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("telemetrySamplesEmitted", emitted);
+        details.put("telemetrySamplesDropped", dropped);
+        details.put("telemetryComplete", dropped == 0);
+        return details;
+    }
+
+    /**
+     * Drops the per-simulation telemetry accounting now that the run is terminal.
+     *
+     * <p>The run's totals are on its lifecycle event and on the retained outcome, so the
+     * counter has no further reader. Without this the publisher's map grows one entry per
+     * run for the life of the process, and it grows fastest exactly when the broker is
+     * struggling — which is the worst possible time to leak.
+     */
+    private void releaseDropAccounting(SimulationRequestedEvent task) {
+        telemetryPublisher.forgetDrops(task.simulationId());
     }
 
     /**
      * Publishes a lifecycle transition.
      *
      * <p>Not fatal when it fails — the run's telemetry is already on the wire — but
-     * counted and logged, because a lost {@code COMPLETED} leaves the aggregator
-     * waiting and the submission stuck at {@code AGGREGATING} with nothing to explain
-     * it.
+     * counted and logged, because a lost {@code COMPLETED} leaves the aggregator waiting
+     * and the submission stuck at {@code AGGREGATING} with nothing to explain it.
      */
     private void publishLifecycle(SimulationRequestedEvent task,
                                   SimulationStatus status,
                                   String message,
                                   long tick,
                                   long totalTicks) {
+        publishLifecycle(task, status, message, tick, totalTicks, Map.of());
+    }
+
+    private void publishLifecycle(SimulationRequestedEvent task,
+                                  SimulationStatus status,
+                                  String message,
+                                  long tick,
+                                  long totalTicks,
+                                  Map<String, Object> details) {
         SimulationLifecycleEvent event = SimulationLifecycleEvent.of(
                 task.correlationId(), task.simulationId(), task.submissionId(),
-                task.scenarioType(), status, message, tick, totalTicks, task.graph());
+                task.scenarioType(), status, message, tick, totalTicks, task.graph(), details);
         if (!simulationLifecyclePublisher.publish(topics.simulationLifecycle(), event)) {
             log.error("Aggregator will not learn that simulation {} is {}: lifecycle publish failed",
                     task.simulationId(), status);
@@ -336,16 +468,54 @@ public class SimulationRunService {
         return runsFailed.get();
     }
 
-    /** Signals that the node declares no usable simulation characteristics. */
-    static final class ValidationException extends RuntimeException {
-        ValidationException(String message) {
-            super(message);
-        }
+    /**
+     * The run was abandoned part-way, and its partial trace should be kept.
+     *
+     * <p>Separate from a generic failure so the terminal event says how far it got. A run
+     * abandoned at tick 40 of 60 has 40 ticks of real measurement behind it, and a user
+     * told "failed" with no figures has strictly less than one told "abandoned at tick
+     * 40".
+     */
+    private void abandon(SimulationRequestedEvent task,
+                         SimulationAbandonedException cause,
+                         long ticksExecuted,
+                         long samplesEmitted,
+                         Timer.Sample sample) {
+        String message = cause.getMessage();
+        log.error("Simulation {} abandoned after {} of {} ticks",
+                task.simulationId(), ticksExecuted, task.tickCount());
+
+        telemetryPublisher.flush();
+        long dropped = telemetryPublisher.droppedFor(task.simulationId());
+
+        // The sample count is passed, not the tick count. Both were called `emitted` at one
+        // point, which put a tick count in under telemetrySamplesEmitted and made any
+        // consumer computing a drop *fraction* from these two keys wrong by the node count
+        // times the metrics per node.
+        Map<String, Object> details = new LinkedHashMap<>(
+                completeness(samplesEmitted, dropped));
+        details.put("partialTraceTicks", ticksExecuted);
+        details.put("telemetryComplete", false);
+
+        runsFailed.incrementAndGet();
+        // Tagged with the status, like every other terminal path. "abandoned" was a sixth
+        // spelling of one outcome, so a dashboard filtering on outcome=timed_out showed
+        // none of the runs it was meant to show.
+        sample.stop(meterRegistry.timer("simulation.run.duration", "outcome",
+                SimulationStatus.TIMED_OUT.getValue()));
+        publishLifecycle(task, SimulationStatus.TIMED_OUT, message,
+                ticksExecuted, Math.max(1, task.tickCount()), details);
+        publishSubmission(task, SubmissionStatus.FAILED,
+                "Simulation timed out after " + ticksExecuted + " of "
+                        + task.tickCount() + " ticks: " + message);
+        outcomeRegistry.recordFailure(task.simulationId(), task.submissionId(),
+                SimulationStatus.TIMED_OUT, message);
+        releaseDropAccounting(task);
     }
 
-    /** Signals that a run exceeded its wall-clock budget. */
-    static final class SimulationTimeoutException extends RuntimeException {
-        SimulationTimeoutException(String message) {
+    /** A task that cannot be simulated at all: no graph, unresolvable scenario, too big. */
+    static final class ValidationException extends RuntimeException {
+        ValidationException(String message) {
             super(message);
         }
     }

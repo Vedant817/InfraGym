@@ -47,6 +47,26 @@ public record SimulationRequestedEvent(
     /** Tick granularity floor: finer than 100 ms only inflates cost, not fidelity. */
     public static final long MIN_TICK_MILLIS = 100L;
 
+    /**
+     * Tick granularity ceiling, in milliseconds.
+     *
+     * <p>Only to keep {@link #tickCount()} well-defined. A long tick makes a run
+     * shorter rather than longer, so it is not a resource risk — but it does mean a
+     * record could divide toward zero and ask for a run of no ticks at all.
+     */
+    public static final long MAX_TICK_MILLIS = 3_600_000L;
+
+    /**
+     * Ceiling on a requested run length, in seconds.
+     *
+     * <p>Two reasons, and the second is the important one. A real one: the simulator
+     * bounds ticks per run anyway, so a longer request is only ever going to be
+     * clamped. The arithmetic one: {@code durationSeconds * 1000} overflows
+     * {@code long} above roughly 9.2e15 seconds, producing a <em>negative</em> tick
+     * count that was published as {@code totalTicks} on the lifecycle event.
+     */
+    public static final long MAX_DURATION_SECONDS = 86_400L;
+
     public SimulationRequestedEvent {
         if (eventId == null) {
             eventId = UUID.randomUUID().toString();
@@ -63,8 +83,23 @@ public record SimulationRequestedEvent(
         if (durationSeconds <= 0) {
             durationSeconds = 60;
         }
+        // Clamped above as well as below. `tickCount()` computes
+        // `durationSeconds * 1000 / tickMillis`, which overflows to a negative number
+        // for a large declared duration -- and that negative value was then published
+        // verbatim as `totalTicks` on the QUEUED and terminal lifecycle events, so a
+        // consumer computing progress as tickCount/totalTicks divided by a negative
+        // zero. The value arrives on the wire, so it is untrusted input.
+        if (durationSeconds > MAX_DURATION_SECONDS) {
+            durationSeconds = MAX_DURATION_SECONDS;
+        }
         if (tickMillis < MIN_TICK_MILLIS) {
             tickMillis = MIN_TICK_MILLIS;
+        }
+        // Bounded as well as floored. An absurd tick length makes the run shorter rather than
+        // longer, so it cannot be used to exhaust a worker; but the cap alone cannot keep
+        // tickCount() above zero, which is what tickCount() itself now guarantees.
+        if (tickMillis > MAX_TICK_MILLIS) {
+            tickMillis = MAX_TICK_MILLIS;
         }
         if (seed == 0) {
             seed = UUID.randomUUID().getMostSignificantBits();
@@ -82,8 +117,19 @@ public record SimulationRequestedEvent(
         return resolved == null ? ScenarioType.NORMAL : resolved;
     }
 
+    /**
+     * How many ticks this task asks for.
+     *
+     * <p>Never zero. The duration and the tick length are both clamped in the constructor,
+     * but clamping alone does not keep this non-zero: a legitimate 60-second run at a
+     * 1-hour tick divides to {@code 60 * 1000 / 3600000 == 0}. That zero is published
+     * verbatim as {@code totalTicks} on the QUEUED lifecycle event, so any consumer
+     * computing progress as {@code tickCount / totalTicks} divided by a known zero —
+     * exactly the defect the clamp was added to stop. The floor belongs here, on the
+     * value itself, not on each of its callers.
+     */
     public long tickCount() {
-        return durationSeconds * 1000L / tickMillis;
+        return Math.max(1L, durationSeconds * 1000L / tickMillis);
     }
 
     public static SimulationRequestedEvent from(DesignSubmittedEvent submission,

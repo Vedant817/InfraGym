@@ -10,10 +10,12 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 
 /**
  * The simulation: a per-component queueing model over a compiled DAG.
@@ -27,8 +29,11 @@ import java.util.Random;
  *
  * <ul>
  *   <li>A database asked for more than its IOPS allow accumulates a backlog, and the
- *       backlog converts into latency for everything upstream of it — via Little's law,
- *       not a multiplier.</li>
+ *       backlog is reported as {@code queue_depth} and {@code queue_age_ms} in its own
+ *       right. It is deliberately <em>not</em> folded into latency: a backlog is a
+ *       property of the queue in front of a component, and charging it to the component
+ *       would report the store as slow when the honest statement is that its callers are
+ *       queued behind it. The path a request actually took is what latency measures.</li>
  *   <li>A cache that stops answering forwards every request to the store behind it,
  *       which is exactly how a cache outage becomes a database outage.</li>
  *   <li>A failing component stops draining its queue, so its downstream starves while
@@ -80,6 +85,7 @@ public class DiscreteEventSimulator {
     private final Map<String, CompiledNode> byId = new HashMap<>();
     private final Map<String, List<CompiledEdge>> incoming = new HashMap<>();
     private final Map<String, List<CompiledEdge>> outgoing = new HashMap<>();
+    private final Map<String, List<FailureInjector.Failure>> failuresByNode = new HashMap<>();
     private final List<String> routingWarnings = new ArrayList<>();
 
     private double totalOffered;
@@ -116,6 +122,24 @@ public class DiscreteEventSimulator {
         // called once per node per tick.
         this.order = graph.inTopologicalOrder();
 
+        // Duplicate ids would collapse in `states` while `order` kept both occurrences,
+        // so every node would be evaluated twice per tick against one shared state:
+        // each (node, metric, tick) key published twice, sample counts doubled, and the
+        // aggregator's percentiles computed over a stream with every sample in it
+        // twice. Rejected rather than de-duplicated, because a graph with two nodes of
+        // one id is not a graph the author drew.
+        //
+        // Tracked in a local set, not in `states`: this check runs before the population
+        // loop below, and asking a map that is still empty whether it contains a key is
+        // asking the wrong question. The answer was always no, so the check never fired.
+        Set<String> seenIds = new HashSet<>();
+        for (CompiledNode node : order) {
+            if (!seenIds.add(node.getId())) {
+                throw new InvalidGraphException("Two components share the id '" + node.getId()
+                        + "'. Every metric would be counted twice.");
+            }
+        }
+
         for (CompiledNode node : order) {
             NodeCharacteristics characteristics = NodeCharacteristics.of(node);
             states.put(node.getId(), new ComponentState(node, characteristics));
@@ -137,7 +161,68 @@ public class DiscreteEventSimulator {
             incoming.computeIfAbsent(edge.getTarget(), key -> new ArrayList<>()).add(edge);
         }
 
+        // Failures are indexed by node id rather than scanned per node per tick. The
+        // scan allocated a Stream per node per tick and cost O(V x F) each time, which
+        // at the documented limits -- 500 storage nodes, a third of them taken down,
+        // 20 000 ticks -- is over a billion lambda invocations and ten million Stream
+        // allocations for one run.
+        for (FailureInjector.Failure failure : this.failures) {
+            failuresByNode.computeIfAbsent(failure.nodeId(), key -> new ArrayList<>()).add(failure);
+        }
+
+        validateTopology();
         detectUnroutableCaches();
+    }
+
+    /**
+     * Rejects a graph the tick loop cannot evaluate honestly.
+     *
+     * <p>The simulator's one-pass-per-tick design depends entirely on
+     * {@code topologicalOrder} being correct, and it does not verify it. A node that
+     * reads a not-yet-evaluated upstream reads a <em>zero</em> rather than the previous
+     * tick's value, because {@code resetTickState} runs at the start of each node's
+     * evaluation. So a wrong order does not produce a slightly wrong number — it
+     * starves every non-entry node <em>permanently</em>, and the run reports
+     * {@code COMPLETED} with all load offered and none served.
+     *
+     * <p>Verified: {@code lb -> api -> mid -> db} with the ranks reversed leaves the
+     * database offered 0.0 requests on every tick and it does not self-heal, because
+     * the cause is the order and not a transient.
+     *
+     * <p>The graph compiler's {@code TopologicalSorter} guarantees all of this, so these
+     * conditions are unreachable from the compiler. They are reachable from a replayed
+     * record, a hand-published task, or any future producer that skips the compiler — and
+     * in each case the failure is silent, which is the reason to check.
+     *
+     * <p>Also rejected: an edge referencing a node that is not present. It makes the
+     * source non-terminal, so nothing is ever counted as served and the run completes
+     * reporting 100% loss with no explanation.
+     */
+    private void validateTopology() {
+        for (CompiledEdge edge : graph.getEdges()) {
+            if (!byId.containsKey(edge.getSource())) {
+                throw new InvalidGraphException("Edge '" + edge.getId() + "' starts at '"
+                        + edge.getSource() + "', which is not a component in this graph.");
+            }
+            if (!byId.containsKey(edge.getTarget())) {
+                throw new InvalidGraphException("Edge '" + edge.getId() + "' ends at '"
+                        + edge.getTarget() + "', which is not a component in this graph.");
+            }
+            int from = rankOf(edge.getSource());
+            int to = rankOf(edge.getTarget());
+            if (from >= to) {
+                throw new InvalidGraphException("Edge '" + edge.getId() + "': component '"
+                        + edge.getSource() + "' (rank " + from + ") calls '" + edge.getTarget()
+                        + "' (rank " + to + "), so the graph is not in topological order. The "
+                        + "upstream's load is reset before the downstream reads it, which would "
+                        + "starve " + edge.getTarget() + " for the whole run.");
+            }
+        }
+    }
+
+    private int rankOf(String nodeId) {
+        CompiledNode node = byId.get(nodeId);
+        return node == null ? Integer.MAX_VALUE : node.getTopologicalOrder();
     }
 
     /**
@@ -210,11 +295,39 @@ public class DiscreteEventSimulator {
      * @param observer  invoked once per tick per component per metric
      */
     public void run(long tickCount, TickObserver observer) {
+        run(tickCount, observer, Long.MAX_VALUE);
+    }
+
+    /**
+     * Runs ticks, abandoning the run if the deadline passes.
+     *
+     * <p>The deadline is checked here rather than by the caller afterwards. Checked
+     * afterwards it bounded nothing at all: the run had already finished, so the check
+     * could only discard a <em>completed</em> run's results rather than stop a slow one.
+     * Checked between ticks it actually stops work — at the cost of leaving the trace
+     * partial, which is why the caller is told rather than left to infer completion from
+     * a tick count.
+     *
+     * @param deadlineNanos {@link System#nanoTime()} value to abandon at, or
+     *                      {@link Long#MAX_VALUE} for no deadline
+     * @throws SimulationAbandonedException if the deadline passes
+     */
+    public void run(long tickCount, TickObserver observer, long deadlineNanos) {
+        // Every DEADLINE_CHECK_INTERVAL ticks rather than every tick: this loop is
+        // otherwise pure arithmetic, so a per-tick clock read would cost more than the
+        // work it was guarding.
         for (long tick = 0; tick < tickCount; tick++) {
+            if (tick % DEADLINE_CHECK_INTERVAL == 0 && System.nanoTime() > deadlineNanos) {
+                throw new SimulationAbandonedException("abandoned after " + tick + " of "
+                        + tickCount + " ticks: the wall-clock budget was exhausted");
+            }
             step(tick, observer);
             ticksExecuted = tick + 1;
         }
     }
+
+    /** Ticks between wall-clock budget checks. */
+    static final long DEADLINE_CHECK_INTERVAL = 16;
 
     /**
      * One tick, in three ordered phases.
@@ -298,7 +411,10 @@ public class DiscreteEventSimulator {
         // silently starves every downstream component.
         state.setLastServedRps(served / tickSeconds);
 
-        double bypassRps = recordBypass(node, state, traits, served);
+        // Divided across downstream branches, so a fan-out conserves the request count
+        // instead of replicating it. See downstreamShare for why.
+        double bypassRps = recordBypass(node, state, traits, served)
+                * downstreamShare(node);
         double latencyMs = pathLatency(state, traits, upstreamPathMs, served);
 
         state.setLastBypassRps(bypassRps);
@@ -310,7 +426,7 @@ public class DiscreteEventSimulator {
         // ceiling — which makes a saturated component indistinguishable from one
         // running exactly at capacity. Offered/capacity crosses 1 and keeps going, so
         // "asked for twice what it can do" is visible as such.
-        state.setLastUtilization(serviceable > 0 ? arrivalCount / serviceable : 0);
+        state.setLastUtilization(utilisation(arrivalCount, serviceable));
         state.setLastErrorRate(arrivalCount > 0 ? failedThisTick / arrivalCount : 0);
 
         if (state.isFailing()) {
@@ -319,14 +435,20 @@ public class DiscreteEventSimulator {
             state.setLastErrorRate(arrivalCount > 0 ? failedThisTick / arrivalCount : 0);
         }
 
-        recordCacheOutcome(node, state, traits, served);
+        recordCacheOutcome(node, state, traits, arrivalCount);
         state.recordLatency(latencyMs);
         state.accumulateTick(served, arrivalCount, failedThisTick,
                 state.getLastServedRps(), state.getLastErrorRate(), state.getLastUtilization());
-        if (node.getType().canBeEntryPoint()) {
+
+        if (isTrafficRoot(node)) {
+            // Counted at the roots only. Counting once per entry-point-typed node
+            // double-counted a CDN in front of a gateway in front of a load balancer --
+            // a completely normal three-tier front end -- and reported three times the
+            // external load. A node is a root only if nothing calls it, which is the
+            // definition that survives an entry point appearing mid-graph.
             totalOffered += arrivalCount;
         }
-        if (outgoing.getOrDefault(node.getId(), List.of()).isEmpty()) {
+        if (isTerminal(node)) {
             totalServed += served;
             totalFailed += failedThisTick;
         }
@@ -384,6 +506,10 @@ public class DiscreteEventSimulator {
             if (!traits.passesThroughOnFailure()) {
                 return 0;
             }
+            // A failed cache forwards everything it was offered, which is the entire
+            // point: the outage's cost is that all of this load now lands on the store
+            // behind it. With several stores behind the cache the volume is divided
+            // between them -- see downstreamShare.
             return state.getLastOfferedRps();
         }
         if (traits.type() == com.archforge.contracts.canvas.NodeType.CACHE) {
@@ -394,6 +520,79 @@ public class DiscreteEventSimulator {
             return misses / tickSeconds;
         }
         return state.getLastServedRps();
+    }
+
+    /**
+     * The share of this node's served load that reaches each downstream component.
+     *
+     * <p><b>Why a split, and not full-rate fan-out.</b> A DAG edge means "calls", and a
+     * call can legitimately produce several — a scatter to three replicas really is
+     * three calls. But the load on a component is what the product reports, and a
+     * component behind a three-way scatter is receiving <em>one request's worth of
+     * traffic divided three ways</em>, not three times the offered load. Sending each
+     * branch the full upstream throughput made every branch report the upstream's whole
+     * load, which produced the two figures a user would first notice and neither could
+     * be true of:
+     *
+     * <pre>
+     *   lb -&gt; api -&gt; {db1, db2},  offered 100 rps
+     *   totalOffered 1000   totalServed 2000      (served &gt; offered)
+     *   db1 offered 1000    db2 offered 1000      (each saw the entire load)
+     * </pre>
+     *
+     * <p>Equal shares is the only defensible default without edge weights, and it
+     * conserves the request count: served can no longer exceed offered, which is the
+     * invariant a reader relies on when they see a completion rate.
+     *
+     * <p>A cache is not exempt, and the exemption it used to carry was doing nothing for
+     * the case it was written for. A cache in front of <em>one</em> store already gets
+     * the whole of its misses: {@code edges <= 1} returns 1.0 without reference to the
+     * node type. The exemption only changed behaviour for a cache with two or more
+     * downstream stores, where it made each store receive the full miss volume and
+     * therefore <b>duplicated</b> the load:
+     *
+     * <pre>
+     *   lb -&gt; api -&gt; cache -&gt; {db1, db2}
+     *   cache serves S, hit rate 0.8  -&gt;  misses = 0.2 S
+     *   db1 offered 0.2 S   db2 offered 0.2 S   total 0.4 S &gt; 0.2 S offered downstream
+     * </pre>
+     *
+     * <p>That is the cache-outage scenario's headline number doubled, and it pushed
+     * {@code completionRate()} above 1.0 — the very invariant this method exists to
+     * protect. Two stores behind one cache is an unusual shape, but a user can draw it
+     * and {@code detectUnroutableCaches} only rejects a cache with <em>zero</em>
+     * downstream, so it was accepted silently.
+     */
+    private double downstreamShare(CompiledNode node) {
+        int edges = outgoing.getOrDefault(node.getId(), List.of()).size();
+        return edges <= 1 ? 1.0 : 1.0 / edges;
+    }
+
+    /**
+     * Whether a node is where external traffic enters: nothing calls it.
+     *
+     * <p>Used instead of {@code canBeEntryPoint()} to decide who to count offered load
+     * against, because the two disagree on a normal front end. A CDN in front of a
+     * gateway in front of a load balancer has three entry-point-typed nodes, and
+     * counting the external load at each one reported it three times over.
+     *
+     * <p>As a *routing* question the type is still the right one — an entry point takes
+     * external traffic even with no upstream, which is what {@code arrivalsFor} relies
+     * on. Only the accounting needs the structural definition.
+     */
+    private boolean isTrafficRoot(CompiledNode node) {
+        return incoming.getOrDefault(node.getId(), List.of()).isEmpty();
+    }
+
+    /**
+     * Whether a node ends a request path.
+     *
+     * <p>Structural: nothing it calls. This is the sink test, and using
+     * {@code canBeTerminal()} instead would miss a service that fans out to two
+     * databases — the requests end at the databases, not at the service.
+     */
+    private boolean isTerminal(CompiledNode node) {
+        return outgoing.getOrDefault(node.getId(), List.of()).isEmpty();
     }
 
     /**
@@ -410,17 +609,38 @@ public class DiscreteEventSimulator {
     private void recordCacheOutcome(CompiledNode node,
                                     ComponentState state,
                                     NodeCharacteristics traits,
-                                    double served) {
+                                    double offered) {
         if (traits.type() != com.archforge.contracts.canvas.NodeType.CACHE) {
             return;
         }
         if (state.isFailing()) {
             // Every lookup missed: the cache answered none of them.
-            state.recordCacheLookup(Math.max(1, (long) Math.round(served)), false);
+            state.recordCacheLookup(lookups(offered), false);
             return;
         }
-        boolean hit = served > 0 && random.nextDouble() >= (1.0 - traits.hitRate());
-        state.recordCacheLookup(Math.max(1, (long) Math.round(served)), hit);
+        boolean hit = offered > 0 && random.nextDouble() >= (1.0 - traits.hitRate());
+        state.recordCacheLookup(lookups(offered), hit);
+    }
+
+    /**
+     * Whole lookups to book for a tick, never more than the tick's traffic.
+     *
+     * <p>The obvious {@code Math.max(1, round(served))} — used here until now — books a
+     * lookup on a tick that served nothing. A failing cache always serves zero, so it
+     * fabricated one miss per failing tick regardless of offered load: 25 invented
+     * lookups for a 25-tick outage, and at a 1 rps / 60-tick run roughly 29% of the
+     * denominator of the published {@code cache_hit_rate}. That dilutes the hit rate with
+     * samples that never happened, in the one component whose whole purpose is to report
+     * its hit rate.
+     *
+     * <p>Rounding to whole lookups is still right — a cache counts operations, not
+     * fractions — but a tick with no traffic contributes no operations.
+     */
+    private static long lookups(double offered) {
+        if (offered <= 0) {
+            return 0;
+        }
+        return Math.max(1L, Math.round(offered));
     }
 
     /**
@@ -453,9 +673,19 @@ public class DiscreteEventSimulator {
                                double served) {
         if (state.isFailing()) {
             if (traits.passesThroughOnFailure()) {
-                // A cache that is not answering still forwards; the cost of the
-                // outage lands on the component that now has to do the work.
-                return upstreamPathMs + propagationMs(state.getNodeId());
+                // A cache that is not answering still forwards; the cost of the outage
+                // lands on the component that now has to do the work. The upstream path is
+                // already this cache's worst incoming path, link delays included, so
+                // nothing is added here.
+                //
+                // It used to add a sum of every incoming edge's propagation delay. That
+                // contradicts the rule everywhere else in this class -- a request traverses
+                // one incoming edge, not all of them -- and it only appeared on this branch,
+                // so a cache recovered to a *higher* reported latency than it had while
+                // healthy: with a 100 ms upstream path and two 5 ms links, healthy was
+                // ~106 ms and failing was 100 + 5 + 10 = 115 ms, an entirely invented 10 ms
+                // step that grew with every edge the design had.
+                return upstreamPathMs;
             }
             if (traits.buffers()) {
                 // A queue whose consumer is stalled still accepts messages at full
@@ -503,13 +733,30 @@ public class DiscreteEventSimulator {
         return worst;
     }
 
-    /** Sum of propagation delays into a node; used for pass-through components. */
-    private double propagationMs(String nodeId) {
-        double total = 0;
-        for (CompiledEdge edge : incoming.getOrDefault(nodeId, List.of())) {
-            total += Math.max(0, edge.getLatencyMs());
+    /**
+     * Saturation for one tick: offered over what the component could have served.
+     *
+     * <p>Two cases the plain ratio gets wrong, both of which reported a busy component as
+     * an idle one:
+     *
+     * <ul>
+     *   <li><b>Capacity resolves to zero.</b> A queue with no consumer, or one whose only
+     *       consumer is failing, drains at nothing — {@code downstreamDrainLimit} returns
+     *       0 and the serviceable volume is therefore 0. Dividing by it was guarded to
+     *       return 0, so the most saturated component in the graph published
+     *       {@code cpu_utilization = 0}, never crossed the saturation threshold, and drew
+     *       no {@code saturated} finding at all. The backlog was visible only as
+     *       {@code queue_depth}. It is reported as saturated instead: it cannot serve any
+     *       of what is arriving, which is the definition.</li>
+     *   <li><b>Nothing arrived.</b> A component offered nothing is genuinely
+     *       unutilised, so that stays 0.</li>
+     * </ul>
+     */
+    private static double utilisation(double arrivalCount, double serviceable) {
+        if (serviceable > 0) {
+            return arrivalCount / serviceable;
         }
-        return total;
+        return arrivalCount > 0 ? 1.0 : 0.0;
     }
 
     /**
@@ -661,9 +908,15 @@ public class DiscreteEventSimulator {
             if (state == null) {
                 continue;
             }
-            boolean shouldFail = failures.stream()
-                    .anyMatch(failure -> failure.nodeId().equals(node.getId())
-                            && failure.isActiveAt(tick));
+            // Looked up, not scanned: the previous form built a Stream per node per tick
+            // and cost O(nodes x failures) each time.
+            boolean shouldFail = false;
+            for (FailureInjector.Failure failure : failuresByNode.getOrDefault(node.getId(), List.of())) {
+                if (failure.isActiveAt(tick)) {
+                    shouldFail = true;
+                    break;
+                }
+            }
 
             if (shouldFail && !state.isFailing()) {
                 state.setFailing(true);

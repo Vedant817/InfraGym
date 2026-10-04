@@ -34,6 +34,7 @@ public record SimulationLifecycleEvent(
         long tickCount,
         long totalTicks,
         ArchitectureDigest architecture,
+        Map<String, Object> details,
         Instant occurredAt) {
 
     public record ArchitectureDigest(
@@ -79,12 +80,41 @@ public record SimulationLifecycleEvent(
         }
     }
 
+    /**
+     * Whether this run's telemetry trace is complete enough to aggregate honestly.
+     *
+     * <p>Absent on {@code RUNNING}, and absent means "not yet known" rather than
+     * "complete". On a terminal event it is a claim the consumer can rely on, which is
+     * the point: an aggregator that publishes a P99 computed from 0.2% of a run's
+     * samples, with nothing marking the trace partial, produces a confident number that
+     * is wrong.
+     */
+    public boolean isTraceComplete() {
+        Object complete = details.get("telemetryComplete");
+        return complete instanceof Boolean flag && flag;
+    }
+
+    /** Samples the engine emitted but could not deliver, or 0 when unstated. */
+    public long droppedSamples() {
+        Object dropped = details.get("telemetrySamplesDropped");
+        return dropped instanceof Number number ? number.longValue() : 0;
+    }
+
+    /** Ticks actually executed before the run ended, or 0 when unstated. */
+    public long ticksExecuted() {
+        Object executed = details.get("ticksExecuted");
+        return executed instanceof Number number ? number.longValue() : tickCount;
+    }
+
     public SimulationLifecycleEvent {
         if (occurredAt == null) {
             occurredAt = Instant.now();
         }
         if (status == null) {
             status = SimulationStatus.RUNNING;
+        }
+        if (details == null) {
+            details = Map.of();
         }
     }
 
@@ -106,6 +136,24 @@ public record SimulationLifecycleEvent(
                 simulationId, submissionId,
                 (scenario == null ? ScenarioType.NORMAL : scenario).getValue(),
                 status, message, tickCount, totalTicks,
-                ArchitectureDigest.of(graph), Instant.now());
+                ArchitectureDigest.of(graph), Map.of(), Instant.now());
+    }
+
+    /** As {@link #of} but carrying terminal-transition details. */
+    public static SimulationLifecycleEvent of(String correlationId,
+                                              String simulationId,
+                                              String submissionId,
+                                              ScenarioType scenario,
+                                              SimulationStatus status,
+                                              String message,
+                                              long tickCount,
+                                              long totalTicks,
+                                              com.archforge.contracts.graph.CompiledGraph graph,
+                                              Map<String, Object> details) {
+        return new SimulationLifecycleEvent(UUID.randomUUID().toString(), correlationId,
+                simulationId, submissionId,
+                (scenario == null ? ScenarioType.NORMAL : scenario).getValue(),
+                status, message, tickCount, totalTicks,
+                ArchitectureDigest.of(graph), details == null ? Map.of() : details, Instant.now());
     }
 }

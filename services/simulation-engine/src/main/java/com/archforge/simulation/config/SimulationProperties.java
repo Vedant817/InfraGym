@@ -50,6 +50,32 @@ public class SimulationProperties {
     private int maxNodes = 500;
 
     /**
+     * Telemetry samples a single run may emit.
+     *
+     * <p><b>This is the ceiling that actually binds.</b> A tick count on its own does not
+     * bound anything useful: the engine emits 7-11 samples per node per tick, so the
+     * largest combination the other two settings accept — {@code maxTicksPerRun} ticks of
+     * {@code maxNodes} nodes — asks for 90 million samples into a 200 000 buffer. At that
+     * point 0.22% of the trace survives and the run reports {@code COMPLETED}, which is
+     * the worst possible outcome: a confident, complete-looking report built from
+     * nothing.
+     *
+     * <p>{@link #getMaxSamplesPerRun()} is converted into an effective tick ceiling per
+     * run, so the bound adapts to the graph's size rather than assuming the largest one.
+     */
+    private long maxSamplesPerRun = 2_000_000;
+
+    /**
+     * Metrics the engine emits per node per tick, on average.
+     *
+     * <p>Used only to convert {@link #getMaxSamplesPerRun()} into a tick ceiling. The
+     * engine's core set is 7 metrics, with 2 more for a messaging node, 1 for a cache
+     * and 2 for storage; 9 is a realistic average for a mixed design and is deliberately
+     * an over-estimate, since a ceiling computed from an under-estimate would not bind.
+     */
+    private int metricsPerNode = 9;
+
+    /**
      * Telemetry samples buffered per run before the oldest are dropped.
      *
      * <p>A 60-tick, 20-node run emits 60 * 20 * ~9 = ~10 800 samples. The buffer is

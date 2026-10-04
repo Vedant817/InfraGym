@@ -12,6 +12,8 @@ package com.archforge.contracts.event;
  * <p>Pair every constant with its {@code *_ENV} override. Services must never
  * hard-code a topic literal.
  */
+import java.util.List;
+
 public final class TopicNames {
 
     private TopicNames() {
@@ -87,10 +89,50 @@ public final class TopicNames {
     public static final String EVALUATION_RESULTS_DLT_ENV = "TOPIC_EVALUATION_RESULTS_DLT";
     public static final String SUBMISSION_LIFECYCLE_DLT_ENV = "TOPIC_SUBMISSION_LIFECYCLE_DLT";
 
-    /** Maps a source topic to its dead-letter topic. */
+    /**
+     * Every declared topic, so a deployment can be checked against the catalogue.
+     *
+     * <p>The topic bootstrapper reads {@code infrastructure/kafka/topics.conf}; this is
+     * the same list in code. Used by the health check to report a topic that this
+     * codebase expects but the cluster does not have.
+     */
+    public static List<String> all() {
+        return List.of(DESIGN_SUBMISSIONS, DESIGN_UPDATES, SUBMISSION_LIFECYCLE,
+                SIMULATION_TASKS, SIMULATION_TELEMETRY, SIMULATION_LIFECYCLE,
+                AGGREGATED_METRICS, AGGREGATED_SUMMARY,
+                EVALUATION_RESULTS, EVALUATION_LIFECYCLE,
+                DESIGN_SUBMISSIONS_DLT, SIMULATION_TASKS_DLT, SIMULATION_TELEMETRY_DLT,
+                AGGREGATED_METRICS_DLT, EVALUATION_RESULTS_DLT, SUBMISSION_LIFECYCLE_DLT);
+    }
+
+    /**
+     * Maps a source topic to its dead-letter topic.
+     *
+     * <p><b>Throws for a topic with no declared dead-letter queue</b>, rather than
+     * composing {@code sourceTopic + ".dlt"}. The old fallthrough produced names for
+     * four topics — {@code simulation.lifecycle.dlt},
+     * {@code aggregated.summary.dlt}, {@code evaluation.lifecycle.dlt},
+     * {@code design.updates.dlt} — that appear in no catalogue and no
+     * {@code topics.conf}. That was invisible only because those topics had no
+     * consumers; the first one added would have dead-lettered into a nonexistent topic,
+     * or auto-created it at the broker's default partition count, silently diverging
+     * from the catalogue that everything else is reconciled against.
+     *
+     * <p>Which is worse: a composed name looks like it works.
+     *
+     * <p><b>Throws rather than guessing.</b> This is the contract for code that decides
+     * where to write — a producer must not silently invent a destination. Callers on a
+     * recovery path must use {@link KafkaTopics#deadLetterFor} instead, which resolves
+     * without throwing precisely because an exception from a
+     * {@code DeadLetterPublishingRecoverer} resolver does not report a bad configuration:
+     * it aborts the recovery, the offset is not committed, and the poison record is
+     * redelivered on every poll forever.
+     *
+     * @throws IllegalArgumentException if the source topic has no declared DLT
+     */
     public static String deadLetterFor(String sourceTopic) {
         if (sourceTopic == null) {
-            return null;
+            throw new IllegalArgumentException("Cannot resolve a dead-letter topic for a null source");
         }
         return switch (sourceTopic) {
             case DESIGN_SUBMISSIONS -> DESIGN_SUBMISSIONS_DLT;
@@ -99,7 +141,30 @@ public final class TopicNames {
             case AGGREGATED_METRICS -> AGGREGATED_METRICS_DLT;
             case EVALUATION_RESULTS -> EVALUATION_RESULTS_DLT;
             case SUBMISSION_LIFECYCLE -> SUBMISSION_LIFECYCLE_DLT;
-            default -> sourceTopic + ".dlt";
+            default -> throw new IllegalArgumentException(
+                    "No dead-letter topic is declared for '" + sourceTopic
+                            + "'. Either add one to TopicNames and topics.conf, or handle the "
+                            + "failure without dead-lettering it. Composing the name here would "
+                            + "publish to a topic that does not exist.");
+        };
+    }
+
+    /**
+     * Whether a dead-letter topic is declared for this source.
+     *
+     * <p>Every topic with a {@code @KafkaListener} must answer true here. A container on a
+     * topic that does not is the configuration this guards against: recovery has nowhere
+     * declared to write, and every option is bad — see
+     * {@code KafkaTopics.deadLetterFor} for how the recovery path copes without looping.
+     */
+    public static boolean hasDeadLetterFor(String sourceTopic) {
+        if (sourceTopic == null) {
+            return false;
+        }
+        return switch (sourceTopic) {
+            case DESIGN_SUBMISSIONS, SIMULATION_TASKS, SIMULATION_TELEMETRY,
+                 AGGREGATED_METRICS, EVALUATION_RESULTS, SUBMISSION_LIFECYCLE -> true;
+            default -> false;
         };
     }
 }

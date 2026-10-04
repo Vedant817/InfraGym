@@ -43,7 +43,9 @@ import java.util.Map;
  *       resolver writes to {@code <topic>.<topic>.<partition>.DLT} — uppercase,
  *       per-partition, and declared in no catalogue — so every DLQ publish failed.
  *       The explicit resolver below routes to the declared lowercase
- *       {@code *.dlt} topics.</li>
+ *       {@code *.dlt} topics, and for a topic with no declared dead-letter queue to a
+ *       composed {@code <topic>.dlt}. Never back to the source: the recoverer writes
+ *       there, the container reads there, and the record fails forever.</li>
  *   <li><b>Offset reset.</b> {@code earliest} by default. {@code latest} silently
  *       discards everything produced before a consumer group's first poll, which is
  *       precisely the window in which a freshly submitted design is lost.</li>

@@ -175,24 +175,36 @@ try {
     # Offsets are compared against the pre-publish baseline, because a group that is
     # merely idle also reports zero. Asserting "lag == 0" alone would pass on a service
     # that never received the record at all.
+    #
+    # A *delta*, and this was the check's own bug: it asserted the committed offset was
+    # at least 1, which any group that had ever consumed anything satisfies — including a
+    # group whose service is not running. The run that found it reported "consumed:
+    # graph-compiler-group committed an offset" in green while the compiler had been
+    # reaped and the record sat unconsumed at lag 1. `kafka-consumer-groups` says "has no
+    # active members" in exactly this situation, so the baseline is the only thing that
+    # distinguishes "consumed my record" from "consumed something once, historically".
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $consumed = $false
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 3
         $offsets = Get-ConsumerGroupOffsets 'graph-compiler-group'
-        if ($offsets -ge 1) {
+        if ($offsets -gt $beforeLag) {
             $consumed = $true
             break
         }
     }
 
     if (-not $consumed) {
-        Write-Host "FAILED: graph-compiler-group committed no offset within ${TimeoutSeconds}s" -ForegroundColor Red
+        Write-Host "FAILED: graph-compiler-group did not advance past $beforeLag within ${TimeoutSeconds}s" -ForegroundColor Red
         Write-Host "  the compiler did not consume the record."
+        $members = docker exec $container bash -c "$kafkaHome/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --describe --group graph-compiler-group" 2>&1
+        if ($members -match 'no active members') {
+            Write-Host "  'no active members' -- the compiler is not running. Start it first." -ForegroundColor Yellow
+        }
         Write-Host "  Check the compiler log for a deserialisation or validation failure."
         exit 1
     }
-    Write-Host "consumed     : graph-compiler-group committed an offset" -ForegroundColor Green
+    Write-Host "consumed     : graph-compiler-group $beforeLag -> $offsets" -ForegroundColor Green
 
     # --- a simulation task must have been produced --------------------------------
     if (-not $SkipTaskCheck) {

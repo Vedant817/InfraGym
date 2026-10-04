@@ -9,6 +9,7 @@ import com.archforge.simulation.workload.WorkloadProfile;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -70,16 +71,40 @@ public record SimulationOutcome(
         }
     }
 
+    /**
+ * A copy of this outcome with one more warning.
+ *
+ * <p>Records are immutable, so a run that discovers part-way through that its telemetry
+ * was dropped cannot mutate the outcome it is building. It copies instead — so the
+ * incompleteness lands in the same record a reader would query, rather than living only
+ * in a log line that nobody reads at the moment they need it.
+     */
+    public SimulationOutcome withWarning(String warning) {
+        List<String> combined = new ArrayList<>(warnings);
+        combined.add(warning);
+        return new SimulationOutcome(simulationId, submissionId, correlationId, scenario, seed,
+                nominalRps, tickCount, tickMillis, nodeReports, failures, List.copyOf(combined),
+                totalOffered, totalServed, totalFailed, graph, workload, startedAt, completedAt);
+    }
+
     public Duration wallClock() {
         return Duration.between(startedAt, completedAt);
     }
 
-    /** Fraction of offered load that completed, over the whole run. */
+    /**
+     * Fraction of offered load that completed, over the whole run.
+     *
+     * <p>Unclamped, deliberately. It was {@code Math.min(1.0, ...)}, which hid the
+     * fan-out bug where every branch of a scatter received the upstream's entire load
+     * and a run reported serving twice what it was offered. A completion rate above 1 is
+     * not a number to tidy away — it is the signal that the accounting is wrong, and
+     * clamping it meant the symptom never reached anyone who could fix it.
+     */
     public double completionRate() {
         if (totalOffered <= 0) {
             return 0;
         }
-        return Math.min(1.0, totalServed / totalOffered);
+        return totalServed / totalOffered;
     }
 
     /**

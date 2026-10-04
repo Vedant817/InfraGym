@@ -27,8 +27,8 @@ import java.util.Map;
  * @param peakErrorRate       worst single-tick error rate
  * @param peakThroughputRps   highest requests-per-second served
  * @param avgThroughputRps    mean requests-per-second served
- * @param peakUtilization     highest served/capacity ratio; >= 1 means saturated
- * @param avgUtilization      mean served/capacity ratio
+ * @param peakUtilization     highest offered/capacity ratio; >= 1 means saturated
+ * @param avgUtilization      mean offered/capacity ratio over the run's ticks
  * @param avgCacheHitRate     mean cache hit rate, or -1 when not a cache
  * @param peakQueueDepth      deepest backlog seen
  * @param maxQueueAgeMs       oldest queued item's age at its worst

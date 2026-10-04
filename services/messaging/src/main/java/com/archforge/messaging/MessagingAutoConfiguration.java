@@ -44,6 +44,16 @@ import org.springframework.context.annotation.Import;
  * service that needs to override one can define its own and have it win.
  */
 @AutoConfiguration
-@Import({KafkaClientConfig.class, KafkaTopics.class, SubmissionLifecyclePublisher.class})
+@Import({
+        KafkaClientConfig.class,
+        KafkaTopics.class,
+        SubmissionLifecyclePublisher.class,
+        // Without this the wire format is whatever Boot's defaults happen to be. The
+        // contracts module states the rule (Instant is ISO-8601, never epoch millis) and
+        // nothing was enforcing it: this class had zero references in the repository.
+        // It holds today only because Boot's defaults coincide with ContractJson, which
+        // is exactly the coincidence that breaks the first time a service adds a
+        // spring.jackson property of its own.
+        ContractJacksonConfig.class})
 public class MessagingAutoConfiguration {
 }

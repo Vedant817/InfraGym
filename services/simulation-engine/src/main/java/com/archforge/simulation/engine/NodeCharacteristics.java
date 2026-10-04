@@ -75,6 +75,31 @@ public final class NodeCharacteristics {
      */
     static final double IOPS_PER_SMALL_READ = 1.0;
 
+    /**
+     * Requests per second per megabit of declared bandwidth, for a component that
+     * publishes bandwidth but no request rate.
+     *
+     * <p>{@code STORAGE} publishes exactly one throughput key,
+     * {@code throughputMbps: 100}. {@link #RATE_KEYS} cannot match it, so
+     * {@link #firstRate} returned null and the object store resolved to the 1 rps floor.
+     * Since {@code WorkloadGenerator.nominalCapacity} takes the <em>minimum</em> over the
+     * bottleneck path, one object store pinned the whole architecture to 1 rps: every
+     * run then offered about one request per second and the entire DAG looked idle.
+     *
+     * <p>This is the same defect the file's own javadoc claims to have fixed for the
+     * cache, one node type over. A lookup that cannot see where a value was published
+     * returns the wrong answer for whichever node type publishes it next, so the fix
+     * has to be a fallback rather than another entry in a list of node types.
+     *
+     * <p>12.5 requests per second per megabit assumes a small object: 100 Mbps yields
+     * 1250 requests/second, the right order of magnitude for an object store serving
+     * short values over a 100 Mbps link.
+     */
+    static final double REQUESTS_PER_MBIT = 12.5;
+
+    /** The bandwidth key, named so the fallback and its test agree on one string. */
+    static final String THROUGHPUT_MBPS = "throughputMbps";
+
     /** Rate assumed when a node declares no throughput figure at all. */
     public static final double UNDECLARED_RATE_RPS = 1.0;
 
@@ -86,6 +111,15 @@ public final class NodeCharacteristics {
 
     /** Cache hit rate assumed when a node declares none. */
     public static final double DEFAULT_HIT_RATE = 0.7;
+
+    /**
+     * Floor on a declared timeout, in milliseconds.
+     *
+     * <p>A zero or negative timeout would make a failing component report a zero
+     * latency, which reads as "faster when broken" — the opposite of the truth, and a
+     * figure no user would believe.
+     */
+    static final double MIN_TIMEOUT_MS = 0.001;
 
     private final CompiledNode node;
     private final double sustainedRateRps;
@@ -122,6 +156,19 @@ public final class NodeCharacteristics {
         boolean declaresThroughput = rate != null;
 
         double resolvedRate = rate != null ? rate : UNDECLARED_RATE_RPS;
+
+        if (rate == null) {
+            // Bandwidth fallback, before the floors below. A component that publishes
+            // Mbps and nothing else is not undeclared -- it is declared in different
+            // units, and treating that as "no figure" silently pins it to 1 rps.
+            Double mbps = firstPositive(node.getThroughput().get(THROUGHPUT_MBPS),
+                    node.getCapacity().get(THROUGHPUT_MBPS));
+            if (mbps != null) {
+                resolvedRate = mbps * REQUESTS_PER_MBIT;
+                declaresThroughput = true;
+            }
+        }
+
         if (isStorage(node.getType())) {
             // IOPS is the physical ceiling; apply it even when a rate key also matched.
             Double iops = firstPositive(node.getCapacity().get("iops"), node.getThroughput().get("iops"));
@@ -144,8 +191,13 @@ public final class NodeCharacteristics {
                 Math.max(1.0, resolvedRate),
                 concurrency == null ? 0 : concurrency,
                 latency == null ? UNDECLARED_LATENCY_MS : latency,
-                propertyDouble(node, "timeoutMs", DEFAULT_TIMEOUT_MS),
-                propertyDouble(node, "hitRate", DEFAULT_HIT_RATE),
+                propertyDouble(node, "timeoutMs", DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, Double.MAX_VALUE),
+                // A hit rate outside [0, 1] inverts the model rather than degrading it:
+                // a user who types 90 meaning 90% produced a cache that forwards nothing
+                // and reports a 100% hit rate, leaving the database behind it apparently
+                // unloaded. Clamped, and the out-of-range declaration is a canvas bug
+                // worth surfacing on its own.
+                propertyDouble(node, "hitRate", DEFAULT_HIT_RATE, 0.0, 1.0),
                 queueBound == null ? Double.MAX_VALUE : queueBound,
                 declaresThroughput,
                 declaresLatency);
@@ -251,6 +303,14 @@ public final class NodeCharacteristics {
         return node.getType().failureIsFailStop() && !node.getType().isMessaging();
     }
 
+    /**
+     * First declared rate key, scanning both the capacity and throughput maps.
+     *
+     * <p>Both maps, and in the order of {@link #RATE_KEYS} — the two consumers of a
+     * declared figure disagreed about where to look, and one of them read only
+     * {@code capacity}. A cache publishes its rate in {@code throughput}, so that lookup
+     * priced a 50 000 ops/second Redis at 1 rps.
+     */
     private static Double firstRate(CompiledNode node) {
         for (String key : RATE_KEYS) {
             Double value = firstPositive(node.getCapacity().get(key), node.getThroughput().get(key));
@@ -259,6 +319,78 @@ public final class NodeCharacteristics {
             }
         }
         return null;
+    }
+
+    /**
+     * Reads a behavioural property from the compiler's enrichment blob.
+     *
+     * <p>The blob is {@code Map<String, Object>} because it is forwarded opaquely to the
+     * AI evaluator; every consumer so far assumed the values were already {@code Double}
+     * and got a {@code ClassCastException} on the integer the compiler actually wrote —
+     * which is why cache hit rate and timeouts were always the hard-coded defaults.
+     *
+     * <p>A JSON round trip also delivers small integers as {@code Integer} or even
+     * {@code String}, both handled here. A numeric string is still a declared value, not
+     * a missing one.
+     *
+     * @param min inclusive lower bound; the result is clamped into {@code [min, max]}
+     *             because these values are user-overridable from the canvas and an
+     *             out-of-range one silently inverts the model rather than degrading it
+     * @param max inclusive upper bound
+     */
+    static double propertyDouble(CompiledNode node, String key, double fallback, double min, double max) {
+        Object properties = node.getSimulationMetadata().get("properties");
+        if (properties instanceof Map<?, ?> map) {
+            Object value = map.get(key);
+            if (value instanceof Number number) {
+                return clamp(number.doubleValue(), min, max);
+            }
+            if (value instanceof String text && !text.isBlank()) {
+                try {
+                    return clamp(Double.parseDouble(text.trim()), min, max);
+                } catch (NumberFormatException ignored) {
+                    return fallback;
+                }
+            }
+        }
+        return fallback;
+    }
+
+    private static double clamp(double value, double min, double max) {
+        if (Double.isNaN(value)) {
+            return min;
+        }
+        return Math.max(min, Math.min(max, value));
+    }
+
+    /**
+     * Unbounded property read, for values with no natural range.
+     *
+     * <p>A NaN resolves to the fallback rather than the bound. The clamp used to return its
+     * lower bound for NaN, which for this overload is negative infinity — so a NaN read
+     * through the unbounded path produced {@code -Infinity}, and every downstream division
+     * by it became zero rather than reporting the problem. No caller uses this overload
+     * yet, which is exactly why it needed saying: it is a trap waiting for the first
+     * property read without a range.
+     */
+    static double propertyDouble(CompiledNode node, String key, double fallback) {
+        Object properties = node.getSimulationMetadata().get("properties");
+        if (properties instanceof Map<?, ?> map) {
+            Object value = map.get(key);
+            if (value instanceof Number number) {
+                double parsed = number.doubleValue();
+                return Double.isNaN(parsed) ? fallback : parsed;
+            }
+            if (value instanceof String text && !text.isBlank()) {
+                try {
+                    double parsed = Double.parseDouble(text.trim());
+                    return Double.isNaN(parsed) ? fallback : parsed;
+                } catch (NumberFormatException ignored) {
+                    return fallback;
+                }
+            }
+        }
+        return fallback;
     }
 
     private static Double firstPositiveOf(Map<String, Double> source, List<String> keys) {
@@ -309,35 +441,6 @@ public final class NodeCharacteristics {
             case WORKER, FUNCTION -> List.of("processingTimeMs", "coldStartMs", "p50Ms");
             default -> List.of("p50Ms");
         };
-    }
-
-    /**
-     * Reads a behavioural property from the compiler's enrichment blob.
-     *
-     * <p>The blob is {@code Map<String, Object>} because it is forwarded opaquely to
-     * the AI evaluator; every consumer so far assumed the values were already
-     * {@code Double} and got a {@code ClassCastException} on the integer the compiler
-     * actually wrote — which is why cache hit rate and timeouts were always the
-     * hard-coded defaults.
-     */
-    static double propertyDouble(CompiledNode node, String key, double fallback) {
-        Object properties = node.getSimulationMetadata().get("properties");
-        if (properties instanceof Map<?, ?> map) {
-            Object value = map.get(key);
-            if (value instanceof Number number) {
-                return number.doubleValue();
-            }
-            // JSON round-trips small integers as Integer/Long/String depending on the
-            // writer; a numeric string is still a declared value, not a missing one.
-            if (value instanceof String text && !text.isBlank()) {
-                try {
-                    return Double.parseDouble(text.trim());
-                } catch (NumberFormatException ignored) {
-                    return fallback;
-                }
-            }
-        }
-        return fallback;
     }
 
     @Override

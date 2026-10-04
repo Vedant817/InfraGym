@@ -40,3 +40,8 @@ docker-compose.override.yml
 # Test scratch
 *.log.gz
 surefire-reports/
+
+# Local verification scratch. Service stdout captured while running the end-to-end
+# harness, plus throwaway probes kept only long enough to read their output. Untracked
+# but not ignored is a standing invitation to `git add -A` it by accident.
+.devlogs/
