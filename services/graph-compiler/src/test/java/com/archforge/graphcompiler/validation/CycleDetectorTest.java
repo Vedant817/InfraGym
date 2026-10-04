@@ -1,119 +1,150 @@
 package com.archforge.graphcompiler.validation;
 
-import com.archforge.graphcompiler.schema.*;
-import org.junit.jupiter.api.BeforeEach;
+import com.archforge.contracts.canvas.CanvasEdge;
+import com.archforge.contracts.canvas.CanvasNode;
+import com.archforge.contracts.canvas.NodeData;
+import com.archforge.contracts.canvas.Topology;
+import com.archforge.graphcompiler.support.TestTopologies;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Tests for {@link CycleDetector}.
+ *
+ * <p>Regression coverage for the duplicate reports: the previous implementation emitted a
+ * cycle for every back-edge it met, so a three-node complete graph produced four cycles
+ * for the same underlying defect, two of them identical — and each became its own
+ * {@code CYCLE_DETECTED} error the user had to read and de-duplicate.
+ */
 class CycleDetectorTest {
 
-    private CycleDetector detector;
+    private final CycleDetector detector = new CycleDetector();
 
-    @BeforeEach
-    void setUp() {
-        detector = new CycleDetector();
+    @Test
+    @DisplayName("finds a two-node cycle")
+    void findsTwoNodeCycle() {
+        List<List<String>> cycles = detector.detectCycles(TestTopologies.withCycle());
+
+        assertEquals(1, cycles.size(), "a simple a->b->a must produce exactly one cycle, got " + cycles);
     }
 
     @Test
-    void detectNoCycles() {
-        ReactFlowTopology topology = createAcyclicTopology();
+    @DisplayName("reports no cycles for a DAG")
+    void reportsNothingForADag() {
+        assertTrue(detector.detectCycles(TestTopologies.validThreeTier()).isEmpty(),
+                "a valid three-tier design must produce no cycles");
+    }
+
+    @Test
+    @DisplayName("finds a three-node cycle")
+    void findsThreeNodeCycle() {
+        Topology topology = new Topology(
+                List.of(
+                        TestTopologies.node("a", "service", "A"),
+                        TestTopologies.node("b", "service", "B"),
+                        TestTopologies.node("c", "service", "C")),
+                List.of(
+                        TestTopologies.edge("e1", "a", "b"),
+                        TestTopologies.edge("e2", "b", "c"),
+                        TestTopologies.edge("e3", "c", "a")));
 
         List<List<String>> cycles = detector.detectCycles(topology);
 
-        assertTrue(cycles.isEmpty());
+        assertEquals(1, cycles.size(), "got " + cycles);
     }
 
     @Test
-    void detectSimpleCycle() {
-        ReactFlowTopology topology = createCyclicTopology();
+    @DisplayName("never reports the same cycle twice")
+    void neverReportsTheSameCycleTwice() {
+        // A complete graph on three nodes has many back-edges. The old implementation
+        // emitted one cycle per back-edge, including duplicates.
+        Topology topology = new Topology(
+                List.of(
+                        TestTopologies.node("a", "service", "A"),
+                        TestTopologies.node("b", "service", "B"),
+                        TestTopologies.node("c", "service", "C")),
+                List.of(
+                        TestTopologies.edge("e1", "a", "b"),
+                        TestTopologies.edge("e2", "b", "c"),
+                        TestTopologies.edge("e3", "a", "c"),
+                        TestTopologies.edge("e4", "b", "a"),
+                        TestTopologies.edge("e5", "c", "a"),
+                        TestTopologies.edge("e6", "c", "b")));
 
         List<List<String>> cycles = detector.detectCycles(topology);
 
-        assertFalse(cycles.isEmpty());
-        assertTrue(cycles.get(0).contains("a"));
-        assertTrue(cycles.get(0).contains("b"));
-        assertTrue(cycles.get(0).contains("c"));
+        Set<List<String>> unique = new HashSet<>();
+        for (List<String> cycle : cycles) {
+            assertTrue(unique.add(cycle), "cycle reported more than once: " + cycle);
+        }
+        assertFalse(cycles.isEmpty(), "a complete graph must contain cycles");
     }
 
     @Test
-    void detectSelfLoop() {
-        ReactFlowTopology topology = new ReactFlowTopology();
+    @DisplayName("is deterministic for the same input")
+    void isDeterministic() {
+        Topology topology = TestTopologies.withCycle();
+        List<List<String>> first = detector.detectCycles(topology);
 
-        ReactFlowNode node = new ReactFlowNode();
-        node.setId("a");
-        node.setType("service");
-        node.setData(new NodeData());
-        node.getData().setLabel("Node A");
-
-        ReactFlowEdge edge = new ReactFlowEdge();
-        edge.setId("e1");
-        edge.setSource("a");
-        edge.setTarget("a");
-
-        topology.setNodes(Collections.singletonList(node));
-        topology.setEdges(Collections.singletonList(edge));
-
-        List<List<String>> cycles = detector.detectCycles(topology);
-
-        assertFalse(cycles.isEmpty());
+        for (int run = 0; run < 20; run++) {
+            assertEquals(first, detector.detectCycles(topology), "run " + run + " differed");
+        }
     }
 
     @Test
-    void detectNullTopology() {
-        List<List<String>> cycles = detector.detectCycles(null);
-        assertTrue(cycles.isEmpty());
+    @DisplayName("ignores self-loops, which EdgeValidator already reports")
+    void ignoresSelfLoops() {
+        // A self-loop would otherwise appear as a degenerate one-element cycle on top of
+        // the SELF_LOOP error the user is already shown.
+        CanvasNode a = TestTopologies.node("a", "service", "A");
+        CanvasNode b = TestTopologies.node("b", "service", "B");
+        Topology topology = new Topology(
+                List.of(a, b),
+                List.of(TestTopologies.edge("e1", "a", "a"), TestTopologies.edge("e2", "a", "b")));
+
+        assertTrue(detector.detectCycles(topology).isEmpty(),
+                "a self-loop is not a cycle for this detector; got " + detector.detectCycles(topology));
     }
 
-    private ReactFlowTopology createAcyclicTopology() {
-        ReactFlowTopology topology = new ReactFlowTopology();
-
-        ReactFlowNode a = createNode("a", "A");
-        ReactFlowNode b = createNode("b", "B");
-        ReactFlowNode c = createNode("c", "C");
-
-        ReactFlowEdge e1 = createEdge("e1", "a", "b");
-        ReactFlowEdge e2 = createEdge("e2", "b", "c");
-
-        topology.setNodes(Arrays.asList(a, b, c));
-        topology.setEdges(Arrays.asList(e1, e2));
-
-        return topology;
+    @Test
+    @DisplayName("tolerates a null topology")
+    void toleratesNull() {
+        assertTrue(detector.detectCycles(null).isEmpty());
     }
 
-    private ReactFlowTopology createCyclicTopology() {
-        ReactFlowTopology topology = new ReactFlowTopology();
+    @Test
+    @DisplayName("terminates on a dense graph")
+    void terminatesOnDenseGraphs() {
+        int n = 12;
+        List<CanvasNode> nodes = new ArrayList<>();
+        List<CanvasEdge> edges = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            NodeData data = new NodeData("N" + i);
+            nodes.add(new CanvasNode("n" + i, "service", null, data));
+        }
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                if (i != j) {
+                    edges.add(new CanvasEdge("e" + i + "-" + j, "n" + i, "n" + j));
+                }
+            }
+        }
 
-        ReactFlowNode a = createNode("a", "A");
-        ReactFlowNode b = createNode("b", "B");
-        ReactFlowNode c = createNode("c", "C");
+        // The bounded enumeration is the point: an unbounded elementary-cycle search on a
+        // complete 12-node graph would not terminate in useful time.
+        List<List<String>> cycles = detector.detectCycles(new Topology(nodes, edges));
 
-        ReactFlowEdge e1 = createEdge("e1", "a", "b");
-        ReactFlowEdge e2 = createEdge("e2", "b", "c");
-        ReactFlowEdge e3 = createEdge("e3", "c", "a");
-
-        topology.setNodes(Arrays.asList(a, b, c));
-        topology.setEdges(Arrays.asList(e1, e2, e3));
-
-        return topology;
-    }
-
-    private ReactFlowNode createNode(String id, String label) {
-        ReactFlowNode node = new ReactFlowNode();
-        node.setId(id);
-        node.setType("service");
-        node.setData(new NodeData());
-        node.getData().setLabel(label);
-        return node;
-    }
-
-    private ReactFlowEdge createEdge(String id, String source, String target) {
-        ReactFlowEdge edge = new ReactFlowEdge();
-        edge.setId(id);
-        edge.setSource(source);
-        edge.setTarget(target);
-        return edge;
+        assertTrue(cycles.size() <= CycleDetector.MAX_REPORTED_CYCLES,
+                "the result must be bounded, got " + cycles.size());
+        assertFalse(cycles.isEmpty(), "a complete graph must produce cycles");
     }
 }

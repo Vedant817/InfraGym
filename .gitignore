@@ -1,1 +1,42 @@
+# Build output
+target/
+node_modules/
+out/
+build/
+dist/
+*.class
+
+# Maven
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Runtime artifacts. Logs are per-developer and can contain topology payloads,
+# credentials from a misconfigured environment, and Kafka message bodies.
+logs/
+*.log
+
+# IDE
+.idea/
+*.iml
 .vscode/
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+bin/
+
+# Local environment. Credentials must never be committed; every service refuses to
+# start without them when security is enabled, so there is nothing legitimate to
+# store here.
+.env
+.env.local
+.env.*.local
+
+# Local overrides for docker-compose. The committed docker-compose.yml carries only
+# non-secret defaults.
+docker-compose.override.yml
+
+# Test scratch
+*.log.gz
+surefire-reports/

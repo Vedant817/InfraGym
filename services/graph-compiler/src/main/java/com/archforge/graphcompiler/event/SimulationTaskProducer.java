@@ -1,6 +1,7 @@
 package com.archforge.graphcompiler.event;
 
-import com.archforge.graphcompiler.schema.SimulationTaskEvent;
+import com.archforge.contracts.event.SimulationRequestedEvent;
+import com.archforge.contracts.event.TopicNames;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -9,10 +10,21 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * Publishes compiled tasks to {@code simulation.tasks} and routes poison
+ * messages to a dead-letter topic.
+ *
+ * <p>The message key is {@code simulationId} so every event for one simulation
+ * lands on one partition. That is what lets the aggregator window a run in
+ * order without a global buffer.
+ *
+ * <p>Topic names come from {@link TopicNames} with an environment override, never
+ * from a literal, so a staging cluster can rename a topic without a rebuild.
+ */
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -21,59 +33,54 @@ public class SimulationTaskProducer {
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
 
-    @Value("${graph-compiler.kafka.topics.simulation-tasks:simulation.tasks}")
+    @Value("${graph-compiler.kafka.topics.simulation-tasks:" + TopicNames.SIMULATION_TASKS + "}")
     private String simulationTasksTopic;
 
-    @Value("${graph-compiler.kafka.topics.dead-letter:graph-compiler.dlt}")
+    @Value("${graph-compiler.kafka.topics.dead-letter:" + TopicNames.SIMULATION_TASKS_DLT + "}")
     private String deadLetterTopic;
 
-    public CompletableFuture<SendResult<String, String>> publishSimulationTask(SimulationTaskEvent event) {
-        String key = event.getSimulationId();
-        String value = serializeEvent(event);
+    public CompletableFuture<SendResult<String, String>> publishSimulationTask(SimulationRequestedEvent event) {
+        String key = event.simulationId();
+        String value = serialize(event);
 
-        log.debug("Publishing simulation task: {} to topic: {}", event.getSimulationId(), simulationTasksTopic);
+        log.debug("Publishing simulation task {} to {} ({} nodes)",
+                key, simulationTasksTopic,
+                event.graph() == null ? 0 : event.graph().nodeCount());
 
-        return kafkaTemplate.send(simulationTasksTopic, key, value)
-                .whenComplete((result, ex) -> {
-                    if (ex != null) {
-                        log.error("Failed to publish simulation task: {}", event.getSimulationId(), ex);
-                    } else {
-                        log.debug("Published simulation task: {} to partition: {}", event.getSimulationId(), result.getRecordMetadata().partition());
-                    }
-                });
+        return kafkaTemplate.send(simulationTasksTopic, key, value);
     }
 
+    /**
+     * Publish an unprocessable payload for later inspection.
+     *
+     * <p>The original message is included so an operator can replay it, but the
+     * failure reason is logged rather than embedded in the envelope: this topic
+     * is read by tooling, and raw exception text tends to leak internal paths and
+     * hostnames into dashboards that are less protected than the logs.
+     */
     public void publishToDeadLetter(String message, String reason, String originalTopic) {
-        log.warn("Publishing to dead letter queue from topic: {}, reason: {}", originalTopic, reason);
+        log.warn("Routing message from {} to {} because: {}", originalTopic, deadLetterTopic, reason);
 
         try {
-            Map<String, String> dlqMessage = new HashMap<>();
-            dlqMessage.put("originalTopic", originalTopic);
-            dlqMessage.put("reason", reason);
-            dlqMessage.put("message", message);
-            dlqMessage.put("timestamp", java.time.Instant.now().toString());
+            Map<String, Object> envelope = new LinkedHashMap<>();
+            envelope.put("originalTopic", originalTopic);
+            envelope.put("deadLetterTopic", deadLetterTopic);
+            envelope.put("reason", reason);
+            envelope.put("message", message);
+            envelope.put("timestamp", java.time.Instant.now().toString());
 
-            String json = objectMapper.writeValueAsString(dlqMessage);
-
-            kafkaTemplate.send(deadLetterTopic, json)
-                    .whenComplete((result, ex) -> {
-                        if (ex != null) {
-                            log.error("Failed to publish to dead letter queue for topic: {}", originalTopic, ex);
-                        } else {
-                            log.debug("Published to dead letter queue: partition {}", result.getRecordMetadata().partition());
-                        }
-                    });
+            kafkaTemplate.send(deadLetterTopic, null, objectMapper.writeValueAsString(envelope));
         } catch (Exception e) {
-            log.error("Failed to serialize dead letter message for topic: {}", originalTopic, e);
+            // Never let DLQ failure mask the original failure.
+            log.error("Failed to publish to dead-letter topic {}", deadLetterTopic, e);
         }
     }
 
-    private String serializeEvent(SimulationTaskEvent event) {
+    private String serialize(SimulationRequestedEvent event) {
         try {
             return objectMapper.writeValueAsString(event);
         } catch (Exception e) {
-            log.error("Failed to serialize simulation task event", e);
-            throw new RuntimeException("Failed to serialize simulation task event", e);
+            throw new IllegalStateException("Failed to serialize simulation task " + event.simulationId(), e);
         }
     }
 }

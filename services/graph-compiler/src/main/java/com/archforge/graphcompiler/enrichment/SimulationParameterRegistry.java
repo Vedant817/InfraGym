@@ -1,6 +1,6 @@
 package com.archforge.graphcompiler.enrichment;
 
-import com.archforge.graphcompiler.schema.NodeType;
+import com.archforge.contracts.canvas.NodeType;
 import org.springframework.stereotype.Component;
 
 import java.util.*;

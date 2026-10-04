@@ -1,127 +1,105 @@
 package com.archforge.graphcompiler.compiler;
 
 import com.archforge.graphcompiler.exception.CompilationException;
-import com.archforge.graphcompiler.schema.*;
-import org.junit.jupiter.api.BeforeEach;
+import com.archforge.graphcompiler.support.TestTopologies;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.util.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import static org.junit.jupiter.api.Assertions.*;
-
+/**
+ * Tests for {@link GraphBuilder}.
+ *
+ * <p>The regression that matters most here: a topology whose nodes all lack ids used to
+ * build a <em>zero-node graph</em> and carry on. That graph was compiled, published to
+ * {@code simulation.tasks} as a legitimate task, and consumed by the simulator as an
+ * architecture with no components. It now fails.
+ */
 class GraphBuilderTest {
 
-    private GraphBuilder graphBuilder;
+    private final GraphBuilder builder = new GraphBuilder();
 
-    @BeforeEach
-    void setUp() {
-        graphBuilder = new GraphBuilder();
+    @Test
+    @DisplayName("builds adjacency in both directions")
+    void buildsBidirectionalAdjacency() {
+        InternalGraph graph = builder.build(TestTopologies.validThreeTier());
+
+        assertEquals(4, graph.nodeCount());
+        assertEquals(3, graph.edgeCount());
+        assertTrue(graph.getAdjacencyList().get("lb").contains("api"));
+        assertTrue(graph.getReverseAdjacencyList().get("api").contains("lb"));
     }
 
     @Test
-    void buildValidTopology() {
-        ReactFlowTopology topology = createValidTopology();
+    @DisplayName("collapses duplicate edges to one")
+    void collapsesDuplicateEdges() {
+        InternalGraph graph = builder.build(TestTopologies.withDuplicateEdges());
 
-        InternalGraph graph = graphBuilder.build(topology);
-
-        assertNotNull(graph);
-        assertEquals(3, graph.getNodeMap().size());
-        assertEquals(2, graph.getEdges().size());
+        // a->b appears twice in the fixture; only one may survive.
+        long aToB = graph.getAdjacencyList().getOrDefault("a", java.util.List.of())
+                .stream().filter(target -> target.equals("b")).count();
+        assertEquals(1, aToB, "a duplicate edge must be collapsed, not double-counted");
     }
 
     @Test
-    void buildNullTopologyThrowsException() {
-        assertThrows(CompilationException.class, () -> graphBuilder.build(null));
+    @DisplayName("rejects a self-loop and records why")
+    void rejectsSelfLoop() {
+        InternalGraph graph = builder.build(TestTopologies.withSelfLoop());
+
+        assertEquals(1, graph.edgeCount(), "the self-loop must not be compiled in");
+        assertTrue(graph.rejectedEdgesOrEmpty().stream()
+                        .anyMatch(rejected -> rejected.reason().equals("SELF_LOOP")),
+                "the self-loop must be recorded as rejected, got " + graph.rejectedEdgesOrEmpty());
     }
 
     @Test
-    void buildEmptyTopologyThrowsException() {
-        ReactFlowTopology topology = new ReactFlowTopology();
-        topology.setNodes(Collections.emptyList());
-        topology.setEdges(Collections.emptyList());
+    @DisplayName("drops an edge referencing a missing node and records why")
+    void dropsDanglingEdge() {
+        InternalGraph graph = builder.build(TestTopologies.withDanglingEdge());
 
-        assertThrows(CompilationException.class, () -> graphBuilder.build(topology));
+        assertEquals(1, graph.edgeCount());
+        assertTrue(graph.rejectedEdgesOrEmpty().stream()
+                        .anyMatch(rejected -> rejected.reason().equals("UNKNOWN_NODE")),
+                "the dangling edge must be recorded, got " + graph.rejectedEdgesOrEmpty());
     }
 
     @Test
-    void buildTopologyWithDuplicateEdges() {
-        ReactFlowTopology topology = createValidTopology();
+    @DisplayName("fails when no node has a usable id")
+    void failsWhenNoNodeHasAnId() {
+        // Regression: this used to produce a zero-node graph that flowed on to the
+        // simulator as a valid, empty architecture.
+        CompilationException ex = assertThrows(CompilationException.class,
+                () -> builder.build(TestTopologies.allNodesWithoutIds()));
 
-        ReactFlowEdge duplicateEdge = new ReactFlowEdge();
-        duplicateEdge.setId("e3");
-        duplicateEdge.setSource("api");
-        duplicateEdge.setTarget("db");
-        topology.getEdges().add(duplicateEdge);
-
-        InternalGraph graph = graphBuilder.build(topology);
-
-        assertEquals(2, graph.getEdges().size());
+        assertTrue(ex.getMessage().contains("usable id"),
+                "the message must explain the problem, got: " + ex.getMessage());
     }
 
     @Test
-    void buildTopologyWithSelfLoop() {
-        ReactFlowTopology topology = createValidTopology();
-
-        ReactFlowEdge selfLoop = new ReactFlowEdge();
-        selfLoop.setId("e3");
-        selfLoop.setSource("api");
-        selfLoop.setTarget("api");
-        topology.getEdges().add(selfLoop);
-
-        InternalGraph graph = graphBuilder.build(topology);
-
-        assertEquals(2, graph.getEdges().size());
+    @DisplayName("rejects a null topology")
+    void rejectsNullTopology() {
+        assertThrows(CompilationException.class, () -> builder.build(null));
     }
 
     @Test
-    void buildTopologyWithDanglingEdge() {
-        ReactFlowTopology topology = createValidTopology();
-
-        ReactFlowEdge danglingEdge = new ReactFlowEdge();
-        danglingEdge.setId("e3");
-        danglingEdge.setSource("api");
-        danglingEdge.setTarget("non-existent");
-        topology.getEdges().add(danglingEdge);
-
-        InternalGraph graph = graphBuilder.build(topology);
-
-        assertEquals(2, graph.getEdges().size());
+    @DisplayName("rejects an empty topology")
+    void rejectsEmptyTopology() {
+        assertThrows(CompilationException.class,
+                () -> builder.build(com.archforge.contracts.canvas.Topology.empty()));
     }
 
-    private ReactFlowTopology createValidTopology() {
-        ReactFlowTopology topology = new ReactFlowTopology();
+    @Test
+    @DisplayName("exposes unmodifiable collections")
+    void exposesUnmodifiableCollections() {
+        InternalGraph graph = builder.build(TestTopologies.validThreeTier());
 
-        ReactFlowNode api = new ReactFlowNode();
-        api.setId("api");
-        api.setType("service");
-        api.setData(new NodeData());
-        api.getData().setLabel("API");
-
-        ReactFlowNode cache = new ReactFlowNode();
-        cache.setId("cache");
-        cache.setType("cache");
-        cache.setData(new NodeData());
-        cache.getData().setLabel("Cache");
-
-        ReactFlowNode db = new ReactFlowNode();
-        db.setId("db");
-        db.setType("database");
-        db.setData(new NodeData());
-        db.getData().setLabel("Database");
-
-        ReactFlowEdge e1 = new ReactFlowEdge();
-        e1.setId("e1");
-        e1.setSource("api");
-        e1.setTarget("cache");
-
-        ReactFlowEdge e2 = new ReactFlowEdge();
-        e2.setId("e2");
-        e2.setSource("cache");
-        e2.setTarget("db");
-
-        topology.setNodes(Arrays.asList(api, cache, db));
-        topology.setEdges(Arrays.asList(e1, e2));
-
-        return topology;
+        assertNotNull(graph.getNodeMap());
+        assertThrows(UnsupportedOperationException.class,
+                () -> graph.getNodeMap().put("x", null));
+        assertThrows(UnsupportedOperationException.class,
+                () -> graph.getEdges().add(null));
     }
 }

@@ -1,194 +1,108 @@
 package com.archforge.graphcompiler.compiler;
 
-import com.archforge.graphcompiler.exception.CompilationException;
-import com.archforge.graphcompiler.schema.*;
-import org.junit.jupiter.api.BeforeEach;
+import com.archforge.graphcompiler.exception.DAGCycleException;
+import com.archforge.graphcompiler.support.TestTopologies;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.util.*;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Tests for {@link TopologicalSorter}.
+ *
+ * <p>Two properties are asserted that the previous suite never checked:
+ * <ul>
+ *   <li><b>Determinism.</b> The same graph must produce the same order on every run.
+ *       With a plain {@code ArrayDeque} of ready nodes the result depended on
+ *       {@code HashMap} iteration order, so the identical design could compile to
+ *       different DAGs on different JVMs — and the AI evaluator's bottleneck would move
+ *       between runs for no reason.</li>
+ *   <li><b>Cycle reporting.</b> A cycle must be rejected with a
+ *       {@link DAGCycleException} naming an actual path, not merely reported as "produced
+ *       N of M nodes".</li>
+ * </ul>
+ */
 class TopologicalSorterTest {
 
-    private GraphBuilder graphBuilder;
-    private TopologicalSorter topologicalSorter;
+    private final GraphBuilder graphBuilder = new GraphBuilder();
+    private final TopologicalSorter sorter = new TopologicalSorter();
 
-    @BeforeEach
-    void setUp() {
-        graphBuilder = new GraphBuilder();
-        topologicalSorter = new TopologicalSorter();
+    @Test
+    @DisplayName("orders nodes so every dependency precedes its dependent")
+    void ordersDependenciesFirst() {
+        InternalGraph graph = graphBuilder.build(TestTopologies.validThreeTier());
+
+        List<String> order = sorter.sort(graph);
+
+        assertEquals(4, order.size(), "every node must appear in the order");
+        assertTrue(order.indexOf("lb") < order.indexOf("api"),
+                "the load balancer feeds the API, so it must come first");
+        assertTrue(order.indexOf("api") < order.indexOf("cache"),
+                "the API feeds the cache, so it must come first");
+        assertTrue(order.indexOf("api") < order.indexOf("db"),
+                "the API feeds the database, so it must come first");
     }
 
     @Test
-    void sortValidDAG() {
-        ReactFlowTopology topology = createValidTopology();
-        InternalGraph graph = graphBuilder.build(topology);
+    @DisplayName("is deterministic across repeated runs")
+    void isDeterministic() {
+        InternalGraph graph = graphBuilder.build(TestTopologies.validThreeTier());
+        List<String> first = sorter.sort(graph);
 
-        List<String> sorted = topologicalSorter.sort(graph);
-
-        assertEquals(3, sorted.size());
-        assertTrue(sorted.indexOf("api") < sorted.indexOf("cache"));
-        assertTrue(sorted.indexOf("cache") < sorted.indexOf("db"));
+        for (int run = 0; run < 50; run++) {
+            assertEquals(first, sorter.sort(graph),
+                    "run " + run + " produced a different order; the sort is not deterministic");
+        }
     }
 
     @Test
-    void sortCyclicGraphThrowsException() {
-        ReactFlowTopology topology = createCyclicTopology();
-        InternalGraph graph = graphBuilder.build(topology);
+    @DisplayName("rejects a cycle and names a path through it")
+    void rejectsCycleWithPath() {
+        InternalGraph graph = graphBuilder.build(TestTopologies.withCycle());
 
-        assertThrows(CompilationException.class, () -> topologicalSorter.sort(graph));
+        DAGCycleException ex = assertThrows(DAGCycleException.class, () -> sorter.sort(graph));
+
+        assertTrue(ex.getCyclePath().size() >= 2,
+                "the reported cycle must contain at least two nodes, got " + ex.getCyclePath());
+        assertTrue(ex.getMessage().toLowerCase().contains("cycle"),
+                "the message must name the problem, got: " + ex.getMessage());
     }
 
     @Test
-    void sortDisconnectedGraph() {
-        ReactFlowTopology topology = createDisconnectedTopology();
-        InternalGraph graph = graphBuilder.build(topology);
+    @DisplayName("rejects a longer cycle")
+    void rejectsLongerCycle() {
+        InternalGraph graph = graphBuilder.build(new com.archforge.contracts.canvas.Topology(
+                java.util.List.of(
+                        TestTopologies.node("a", "service", "A"),
+                        TestTopologies.node("b", "service", "B"),
+                        TestTopologies.node("c", "service", "C")),
+                java.util.List.of(
+                        TestTopologies.edge("e1", "a", "b"),
+                        TestTopologies.edge("e2", "b", "c"),
+                        TestTopologies.edge("e3", "c", "a"))));
 
-        List<String> sorted = topologicalSorter.sort(graph);
+        DAGCycleException ex = assertThrows(DAGCycleException.class, () -> sorter.sort(graph));
 
-        assertEquals(4, sorted.size());
+        Set<String> inPath = new HashSet<>(ex.getCyclePath());
+        assertTrue(inPath.contains("a") || inPath.contains("b") || inPath.contains("c"),
+                "the cycle path must name real nodes, got " + ex.getCyclePath());
     }
 
     @Test
-    void sortSingleNode() {
-        ReactFlowTopology topology = new ReactFlowTopology();
+    @DisplayName("handles a graph with no edges")
+    void handlesEdgelessGraph() {
+        InternalGraph graph = graphBuilder.build(new com.archforge.contracts.canvas.Topology(
+                java.util.List.of(
+                        TestTopologies.node("a", "service", "A"),
+                        TestTopologies.node("b", "service", "B")),
+                java.util.List.of()));
 
-        ReactFlowNode node = new ReactFlowNode();
-        node.setId("api");
-        node.setType("service");
-        node.setData(new NodeData());
-        node.getData().setLabel("API");
-
-        topology.setNodes(Collections.singletonList(node));
-        topology.setEdges(Collections.emptyList());
-
-        InternalGraph graph = graphBuilder.build(topology);
-        List<String> sorted = topologicalSorter.sort(graph);
-
-        assertEquals(1, sorted.size());
-        assertEquals("api", sorted.get(0));
-    }
-
-    private ReactFlowTopology createValidTopology() {
-        ReactFlowTopology topology = new ReactFlowTopology();
-
-        ReactFlowNode api = new ReactFlowNode();
-        api.setId("api");
-        api.setType("service");
-        api.setData(new NodeData());
-        api.getData().setLabel("API");
-
-        ReactFlowNode cache = new ReactFlowNode();
-        cache.setId("cache");
-        cache.setType("cache");
-        cache.setData(new NodeData());
-        cache.getData().setLabel("Cache");
-
-        ReactFlowNode db = new ReactFlowNode();
-        db.setId("db");
-        db.setType("database");
-        db.setData(new NodeData());
-        db.getData().setLabel("Database");
-
-        ReactFlowEdge e1 = new ReactFlowEdge();
-        e1.setId("e1");
-        e1.setSource("api");
-        e1.setTarget("cache");
-
-        ReactFlowEdge e2 = new ReactFlowEdge();
-        e2.setId("e2");
-        e2.setSource("cache");
-        e2.setTarget("db");
-
-        topology.setNodes(Arrays.asList(api, cache, db));
-        topology.setEdges(Arrays.asList(e1, e2));
-
-        return topology;
-    }
-
-    private ReactFlowTopology createCyclicTopology() {
-        ReactFlowTopology topology = new ReactFlowTopology();
-
-        ReactFlowNode a = new ReactFlowNode();
-        a.setId("a");
-        a.setType("service");
-        a.setData(new NodeData());
-        a.getData().setLabel("A");
-
-        ReactFlowNode b = new ReactFlowNode();
-        b.setId("b");
-        b.setType("service");
-        b.setData(new NodeData());
-        b.getData().setLabel("B");
-
-        ReactFlowNode c = new ReactFlowNode();
-        c.setId("c");
-        c.setType("service");
-        c.setData(new NodeData());
-        c.getData().setLabel("C");
-
-        ReactFlowEdge e1 = new ReactFlowEdge();
-        e1.setId("e1");
-        e1.setSource("a");
-        e1.setTarget("b");
-
-        ReactFlowEdge e2 = new ReactFlowEdge();
-        e2.setId("e2");
-        e2.setSource("b");
-        e2.setTarget("c");
-
-        ReactFlowEdge e3 = new ReactFlowEdge();
-        e3.setId("e3");
-        e3.setSource("c");
-        e3.setTarget("a");
-
-        topology.setNodes(Arrays.asList(a, b, c));
-        topology.setEdges(Arrays.asList(e1, e2, e3));
-
-        return topology;
-    }
-
-    private ReactFlowTopology createDisconnectedTopology() {
-        ReactFlowTopology topology = new ReactFlowTopology();
-
-        ReactFlowNode a = new ReactFlowNode();
-        a.setId("a");
-        a.setType("service");
-        a.setData(new NodeData());
-        a.getData().setLabel("A");
-
-        ReactFlowNode b = new ReactFlowNode();
-        b.setId("b");
-        b.setType("service");
-        b.setData(new NodeData());
-        b.getData().setLabel("B");
-
-        ReactFlowNode c = new ReactFlowNode();
-        c.setId("c");
-        c.setType("service");
-        c.setData(new NodeData());
-        c.getData().setLabel("C");
-
-        ReactFlowNode d = new ReactFlowNode();
-        d.setId("d");
-        d.setType("service");
-        d.setData(new NodeData());
-        d.getData().setLabel("D");
-
-        ReactFlowEdge e1 = new ReactFlowEdge();
-        e1.setId("e1");
-        e1.setSource("a");
-        e1.setTarget("b");
-
-        ReactFlowEdge e2 = new ReactFlowEdge();
-        e2.setId("e2");
-        e2.setSource("c");
-        e2.setTarget("d");
-
-        topology.setNodes(Arrays.asList(a, b, c, d));
-        topology.setEdges(Arrays.asList(e1, e2));
-
-        return topology;
+        assertEquals(Set.of("a", "b"), new HashSet<>(sorter.sort(graph)));
     }
 }

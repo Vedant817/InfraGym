@@ -1,46 +1,34 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<configuration scan="true" scanPeriod="30 seconds">
-    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+<!--
+  Service logging: delegates to the shared policy in the messaging module so the
+  rolling strategy is defined once for all services. See archforge-logback.xml for
+  why SizeAndTimeBasedRollingPolicy is mandatory here.
+-->
+<configuration scan="false" debug="false">
+    <include resource="archforge-logback.xml"/>
 
-    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-        <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-},%X{spanId:-}] %-5level %logger{36} - %msg%n</pattern>
-        </encoder>
-    </appender>
+    <property name="APP_LOG_FILE" value="graph-compiler"/>
 
-    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>logs/graph-compiler.log</file>
-        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-            <fileNamePattern>logs/graph-compiler.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
-            <maxFileSize>100MB</maxFileSize>
-            <maxHistory>30</maxHistory>
-            <totalSizeCap>10GB</totalSizeCap>
-        </rollingPolicy>
-        <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-},%X{spanId:-}] %-5level %logger{36} - %msg%n</pattern>
-        </encoder>
-    </appender>
-
-    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
-        <queueSize>512</queueSize>
+    <appender name="ASYNC_STDOUT" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>4096</queueSize>
         <discardingThreshold>0</discardingThreshold>
-        <appender-ref ref="FILE"/>
+        <neverBlock>false</neverBlock>
+        <appender-ref ref="CONSOLE"/>
     </appender>
 
     <springProfile name="!prod">
-        <root level="INFO">
-            <appender-ref ref="CONSOLE"/>
+        <root level="${LOG_LEVEL:-INFO}">
+            <appender-ref ref="ASYNC_STDOUT"/>
             <appender-ref ref="ASYNC_FILE"/>
         </root>
     </springProfile>
 
     <springProfile name="prod">
-        <root level="INFO">
-            <appender-ref ref="ASYNC_FILE"/>
+        <!-- stdout only: a container log collector owns the lifecycle of its output. -->
+        <root level="${LOG_LEVEL:-INFO}">
+            <appender-ref ref="ASYNC_STDOUT"/>
         </root>
     </springProfile>
 
-    <logger name="com.archforge.graphcompiler" level="INFO"/>
-    <logger name="org.springframework.kafka" level="INFO"/>
-    <logger name="org.apache.kafka" level="WARN"/>
+    <logger name="com.archforge.graphcompiler" level="${APP_LOG_LEVEL:-INFO}"/>
 </configuration>

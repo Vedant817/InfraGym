@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared logging configuration for every ArchForge service.
+
+  Included by each service's logback-spring.xml so a rolling-policy mistake cannot
+  be made six times. Two properties of this file are load-bearing and were both
+  real production-defects before this file existed:
+
+  1. SizeAndTimeBasedRollingPolicy, NOT TimeBasedRollingPolicy. Logback rejects a
+     fileNamePattern containing %i under TimeBasedRollingPolicy with an ERROR
+     status, and Spring Boot aborts startup on any logback ERROR. It also silently
+     ignores maxFileSize/totalSizeCap under TimeBasedRollingPolicy, so daily files
+     grow without bound.
+  2. The log directory comes from ARCHFORGE_LOG_DIR (default /var/log/archforge in
+     containers, ./logs on a workstation) so a container does not try to write into
+     its own layer filesystem.
+-->
+<included>
+    <property name="LOG_DIR" value="${ARCHFORGE_LOG_DIR:-./logs}"/>
+    <property name="LOG_MAX_HISTORY" value="${ARCHFORGE_LOG_MAX_HISTORY:-14}"/>
+    <property name="LOG_TOTAL_SIZE_CAP" value="${ARCHFORGE_LOG_TOTAL_SIZE_CAP:-2GB}"/>
+    <property name="LOG_MAX_FILE_SIZE" value="${ARCHFORGE_LOG_MAX_FILE_SIZE:-50MB}"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-},%X{spanId:-}] %-5level %logger{36} - %msg%n</pattern>
+            <immediateFlush>true</immediateFlush>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_DIR}/${APP_LOG_FILE:-archforge}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_DIR}/${APP_LOG_FILE:-archforge}.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>${LOG_MAX_FILE_SIZE}</maxFileSize>
+            <maxHistory>${LOG_MAX_HISTORY}</maxHistory>
+            <totalSizeCap>${LOG_TOTAL_SIZE_CAP}</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-},%X{spanId:-}] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!--
+      Never discard: silently dropping WARN/ERROR under load is how incidents become
+      invisible. Bounded at 8192 so a log-storm backpressures rather than OOMs.
+    -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>8192</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>false</neverBlock>
+        <includeCallerData>false</includeCallerData>
+        <appender-ref ref="FILE"/>
+    </appender>
+
+    <logger name="org.apache.kafka" level="WARN"/>
+    <logger name="org.springframework.kafka" level="INFO"/>
+    <logger name="kafka" level="WARN"/>
+    <logger name="org.mongodb.driver" level="WARN"/>
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+</included>

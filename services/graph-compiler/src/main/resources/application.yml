@@ -1,93 +1,141 @@
 spring:
   application:
     name: graph-compiler
+
+  # Only the bootstrap list and the group id live here. Producer, consumer and
+  # container settings are defined once in the shared KafkaClientConfig, because a
+  # service-local factory bean silently overrides every key below it — which is how
+  # this file previously said `auto-offset-reset: earliest` while the code did
+  # `latest`, and said `acks: all` while a sibling service did `acks: 1`.
   kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
     consumer:
-      group-id: graph-compiler-group
-      auto-offset-reset: latest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      properties:
-        spring.json.trusted.packages: "com.archforge.graphcompiler.*"
-        max.poll.records: 500
-        max.poll.interval.ms: 300000
-    producer:
-      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.apache.kafka.common.serialization.StringSerializer
-      acks: all
-      retries: 3
-      properties:
-        enable.idempotence: true
-        batch.size: 16384
-        linger.ms: 5
-        compression.type: snappy
-    listener:
-      concurrency: 3
-      ack-mode: manual
-  servlet:
-    multipart:
-      max-request-size: 10MB
-      max-file-size: 10MB
+      group-id: ${KAFKA_GROUP_ID:graph-compiler-group}
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   mvc:
     async:
       request-timeout: 30000
-  lifecycle:
-    timeout-per-shutdown-phase: 30s
 
 server:
   port: ${SERVER_PORT:8081}
   shutdown: graceful
   tomcat:
-    max-http-form-post-size: 10MB
     connection-timeout: 30000
+    # Bounds an application/json body. Neither multipart.max-request-size nor
+    # max-http-form-post-size applies to JSON, so without this a single request
+    # could stream an unbounded array of nodes into the heap.
+    max-swallow-size: 4MB
+    threads:
+      max: 200
+
+archforge:
+  kafka:
+    enabled: ${KAFKA_ENABLED:true}
+    listener:
+      concurrency: ${KAFKA_CONCURRENCY:2}
+    consumer:
+      # `earliest`, not `latest`: with `latest`, anything published before this
+      # group's first poll is discarded with no trace — which is exactly the window
+      # a freshly submitted design falls into on a cold start.
+      auto-offset-reset: earliest
+      max-poll-records: 100
+      max-poll-interval-ms: 900000
+    producer:
+      max-request-size: ${KAFKA_MAX_REQUEST_SIZE:2097152}
+    error-handler:
+      max-attempts: 4
+      initial-interval-ms: 500
+      multiplier: 2.0
+      max-interval-ms: 10000
+    metrics:
+      poll-interval-ms: 30000
+      initial-delay-ms: 15000
+    health:
+      # design.submissions + simulation.tasks + design.submissions.dlt
+      expected-topics: 3
+
+  topics:
+    design-submissions: ${TOPIC_DESIGN_SUBMISSIONS:design.submissions}
+    simulation-tasks: ${TOPIC_SIMULATION_TASKS:simulation.tasks}
+    design-submissions-dlt: ${TOPIC_DESIGN_SUBMISSIONS_DLT:design.submissions.dlt}
+
+  security:
+    enabled: ${SECURITY_ENABLED:true}
+    # No defaults. The service refuses to start if these are missing while security
+    # is enabled; the previous version shipped admin/admin in source, which granted
+    # /actuator/heapdump and /actuator/loggers to anyone who knew the password.
+    compile-user: ${COMPILE_USER:}
+    compile-password: ${COMPILE_PASSWORD:}
+    admin-user: ${ADMIN_USER:}
+    admin-password: ${ADMIN_PASSWORD:}
+
+  cors:
+    # Exact origins, never "*": a wildcard with credentials is rejected by browsers
+    # anyway, and an open CORS policy on an authenticated API is an exfiltration
+    # vector. Configure the dev-server origin explicitly.
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+
+  validation:
+    max-nodes: ${MAX_NODES:500}
+    max-edges: ${MAX_EDGES:2000}
+    max-config-bytes-per-node: ${MAX_CONFIG_BYTES_PER_NODE:4096}
+
+  simulation:
+    default-duration-seconds: ${SIMULATION_DURATION_SECONDS:60}
+    tick-millis: ${SIMULATION_TICK_MILLIS:1000}
+
+graph-compiler:
+  # Retained as an alias so existing deployments overriding these keep working.
+  validation:
+    max-nodes: ${MAX_NODES:500}
+    max-edges: ${MAX_EDGES:2000}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus,loggers
+        # prometheus is exposed but needs micrometer-registry-prometheus to serve it;
+        # without the registry the endpoint 404s, which looks like a broken exporter.
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: when-authorized
+      probes:
+        enabled: true
       group:
+        # Both groups must be reachable without credentials: Kubernetes sends none,
+        # and the previous rule required ROLE_ADMIN for /actuator/health/**, so the
+        # pod was killed and restarted in a loop.
         readiness:
-          include: kafka,diskSpace
+          include: readinessState,kafka,diskSpace
         liveness:
-          include: ping
+          include: livenessState
   metrics:
     tags:
-      application: graph-compiler
+      application: ${spring.application.name}
       environment: ${ENVIRONMENT:dev}
     distribution:
       percentiles-histogram:
         http.server.requests: true
+        graph.compilation.duration: true
+      slo:
+        graph.compilation.duration: 10ms,50ms,100ms,250ms,500ms,1s
+  # Trace context only: traceId/spanId land in the log MDC, so a request can be
+  # followed across services by grepping a log line. Span *export* is intentionally
+  # not configured — see the pom comment on zipkin-reporter-brave.
   tracing:
     sampling:
-      probability: 0.1
+      probability: ${TRACING_SAMPLE_RATE:0.1}
 
-graph-compiler:
-  kafka:
-    topics:
-      design-submissions: design.submissions
-      simulation-tasks: simulation.tasks
-      simulation-telemetry: simulation.telemetry
-      dead-letter: graph-compiler.dlt
-    consumer:
-      max-poll-records: 500
-      poll-timeout: 5000
-    producer:
-      retries: 3
-      retry-backoff-ms: 1000
-  validation:
-    max-nodes: 500
-    max-edges: 2000
-  rate-limit:
-    requests-per-minute: 10
-    burst-capacity: 5
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
 
 logging:
   level:
-    com.archforge.graphcompiler: INFO
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId:-},%X{spanId:-}] %-5level %logger{36} - %msg%n"
+    root: ${LOG_LEVEL:INFO}
+    com.archforge.graphcompiler: ${APP_LOG_LEVEL:INFO}
