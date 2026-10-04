@@ -221,6 +221,7 @@ public class AggregatePublisher {
                 run.startedAt(),
                 Instant.now(),
                 run.tickCount(),
+                run.totalTicks(),
                 run.tickMillis(),
                 List.of()),
                 run, windows.size());

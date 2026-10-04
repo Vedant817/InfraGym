@@ -1,209 +1,266 @@
 package com.archforge.ai.service;
 
-import com.archforge.ai.model.AggregatedMetricsEvent;
-import com.archforge.ai.model.EvaluationResult;
-import lombok.RequiredArgsConstructor;
+import com.archforge.ai.analysis.ArchitectureAnalysis;
+import com.archforge.ai.config.EvaluatorProperties;
+import com.archforge.ai.event.EvaluationLifecyclePublisher;
+import com.archforge.contracts.event.ArchitectureEvaluationEvent;
+import com.archforge.contracts.event.SimulationSummaryEvent;
+import com.archforge.messaging.KafkaTopics;
+import com.archforge.contracts.event.EvaluationLifecycleEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.vectorstore.VectorStore;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
+/**
+ * Turns a finished run into an evaluation.
+ *
+ * <p><b>The order of operations is the design.</b> The arithmetic runs first and is always
+ * published. The model runs second, on a bounded budget, and can only <em>add</em> -- it can
+ * contribute prose and findings the measurements did not already yield, and it can never
+ * change the score, the verdict band, the bottlenecks, or anything the summary itself says.
+ * If it fails, times out, or is not configured, the event is still published with
+ * {@code degraded = true} and a reason.
+ *
+ * <p>That ordering is the difference between an evaluation and a paragraph. The previous
+ * implementation had no deterministic half at all: the score was whatever string the model
+ * emitted after {@code SCORE:} was found in a free-text response, and a response phrased
+ * any other way produced a silent 50 with empty lists. There was nothing to degrade to.
+ */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class ArchitectureEvaluationService {
 
-    private final ChatClient chatClient;
-    private final VectorStore vectorStore;
-    private final KafkaTemplate<String, String> kafkaTemplate;
-    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+    /** How long a publish may take before it is treated as failed. */
+    static final int AWAIT_TIMEOUT_SECONDS = 15;
 
-    @Value("${ai.kafka.topics.evaluation-results:evaluation.results}")
-    private String evaluationResultsTopic;
+    /**
+     * Runs the model off the listener thread.
+     *
+     * <p>The listener thread is shared by every evaluation this instance is handling. A model
+     * that hangs would stop consuming every other run's summary, and the symptom would be a
+     * batch of submissions quietly stuck at "evaluating".
+     */
+    private final ExecutorService modelExecutor;
 
-    @Value("${ai.rag.max-results:5}")
-    private int maxRagResults;
+    private final DeterministicAnalysisRunner analysisRunner;
+    private final NarrativeModel narrativeModel;
+    private final KnowledgeRetriever knowledgeRetriever;
+    private final EvaluationLifecyclePublisher lifecyclePublisher;
+    private final EvaluationResultPublisher resultPublisher;
+    private final EvaluatorProperties properties;
+    private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
 
-    public EvaluationResult evaluate(String simulationId, String submissionId,
-                                      List<AggregatedMetricsEvent> metrics) {
-        log.info("Starting evaluation for simulation: {}", simulationId);
+    public ArchitectureEvaluationService(DeterministicAnalysisRunner analysisRunner,
+                                        NarrativeModel narrativeModel,
+                                        KnowledgeRetriever knowledgeRetriever,
+                                        EvaluationLifecyclePublisher lifecyclePublisher,
+                                        EvaluationResultPublisher resultPublisher,
+                                        EvaluatorProperties properties,
+                                        ObjectMapper objectMapper,
+                                        MeterRegistry meterRegistry,
+                                        @Qualifier("evaluationModelExecutor")
+                                        ExecutorService modelExecutor) {
+        this.analysisRunner = analysisRunner;
+        this.narrativeModel = narrativeModel;
+        this.knowledgeRetriever = knowledgeRetriever;
+        this.lifecyclePublisher = lifecyclePublisher;
+        this.resultPublisher = resultPublisher;
+        this.properties = properties;
+        this.objectMapper = objectMapper;
+        this.meterRegistry = meterRegistry;
+        this.modelExecutor = modelExecutor;
+    }
 
-        String architectureSummary = buildArchitectureSummary(metrics);
-        String metricsSummary = buildMetricsSummary(metrics);
+    /**
+     * Evaluates one run and publishes the result.
+     *
+     * @return the published event, which is also what the caller should return rather than a
+     *         partially-built intermediate
+     */
+    public ArchitectureEvaluationEvent evaluate(SimulationSummaryEvent summary) {
+        String evaluationId = UUID.randomUUID().toString();
+        long startedAt = System.nanoTime();
+        lifecyclePublisher.started(summary, evaluationId);
 
-        List<String> references = retrieveRelevantKnowledge(architectureSummary);
+        // Step 1: the arithmetic. Never fails on anything a model can fail on.
+        ArchitectureAnalysis analysis = analysisRunner.analyse(summary);
+        meterRegistry.counter("evaluator.analysis.score", "verdict", analysis.verdict())
+                .increment(analysis.overallScore());
 
-        String prompt = buildEvaluationPrompt(architectureSummary, metricsSummary, references);
+        // Step 2: references. Best-effort by construction, and its own shortfall is folded
+        // into the caveats so "no references" and "could not reach references" stay
+        // distinguishable on the published record.
+        KnowledgeRetriever.Retrieval retrieval = knowledgeRetriever.retrieve(
+                summary, properties.getRag().getTopK());
+        if (retrieval.degraded()) {
+            analysis = analysis.withCaveat(retrieval.note());
+        }
+        List<ArchitectureEvaluationEvent.KnowledgeReference> references = retrieval.references();
 
+        // Step 3: the narrative, on a budget, contributing at most.
+        NarrativeModel.Narrative narrative = narrativeModel(properties.isModelEnabled()
+                ? summary : null, analysis, references, startedAt);
+
+        ArchitectureEvaluationEvent event = merge(summary, analysis, narrative, references,
+                evaluationId, System.nanoTime() - startedAt);
+
+        resultPublisher.publish(event);
+        lifecyclePublisher.completed(summary, evaluationId, event.degraded(),
+                event.degradedReason());
+
+        log.info("Evaluated simulation {} (submission {}): score {}/100, verdict {}, "
+                        + "{} finding(s), {} bottleneck(s), {} reference(s), model {}, {} ms{}",
+                summary.simulationId(), summary.submissionId(), event.overallScore(),
+                event.verdict(), event.findings().size(), event.bottlenecks().size(),
+                references.size(), event.model(), event.latencyMs(),
+                event.degraded() ? " (degraded: " + event.degradedReason() + ")" : "");
+        return event;
+    }
+
+    /**
+     * Asks the model for its contribution, or explains why there isn't one.
+     *
+     * <p>The timeout is the important part. The deterministic evaluation is already
+     * computed and waiting; the prose is a bonus on top of it. Making a user wait minutes
+     * for the bonus is strictly worse than publishing the measurements now and the commentary
+     * never -- so the budget is enforced, not merely hoped for.
+     */
+    private NarrativeModel.Narrative narrativeModel(SimulationSummaryEvent summary,
+                                                   ArchitectureAnalysis analysis,
+                                                   List<ArchitectureEvaluationEvent.KnowledgeReference> references,
+                                                   long startedAtNanos) {
+        if (!properties.isModelEnabled()) {
+            meterRegistry.counter("evaluator.model.disabled").increment();
+            return NarrativeModel.Narrative.unavailable(
+                    "No narrative was generated: the model is disabled by configuration. The "
+                            + "score, verdict and findings below are the complete arithmetic evaluation.");
+        }
+        if (!narrativeModel.available()) {
+            meterRegistry.counter("evaluator.model.unavailable").increment();
+            return NarrativeModel.Narrative.unavailable(
+                    "No narrative was generated: no model is configured or reachable. The score, "
+                            + "verdict and findings below are the complete arithmetic evaluation.");
+        }
+
+        CompletableFuture<NarrativeModel.Narrative> future =
+                CompletableFuture.supplyAsync(
+                        () -> narrativeModel.narrate(summary, analysis, references), modelExecutor);
         try {
-            ChatResponse response = chatClient.prompt()
-                    .user(prompt)
-                    .call()
-                    .chatResponse();
-
-            String evaluationText = response.getResult().getOutput().getText();
-
-            EvaluationResult result = parseEvaluationResponse(simulationId, submissionId,
-                    evaluationText, metrics, references);
-
-            publishResult(result);
-
-            log.info("Evaluation completed for simulation: {}", simulationId);
-            return result;
-        } catch (Exception e) {
-            log.error("Evaluation failed for simulation: {}", simulationId, e);
-            throw new RuntimeException("Evaluation failed", e);
+            NarrativeModel.Narrative narrative = future.get(
+                    properties.getModelTimeoutMillis(), TimeUnit.MILLISECONDS);
+            meterRegistry.counter("evaluator.model.succeeded").increment();
+            return narrative;
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            meterRegistry.counter("evaluator.model.timeout").increment();
+            log.warn("Model did not respond within {} ms for simulation {}; publishing the "
+                            + "deterministic evaluation without it",
+                    properties.getModelTimeoutMillis(), analysis.overallScore() >= 0
+                            ? "under evaluation" : "unknown");
+            return NarrativeModel.Narrative.unavailable(String.format(Locale.ROOT,
+                    "No narrative was generated: the model did not respond within %d ms. The "
+                            + "score, verdict and findings below are the complete arithmetic "
+                            + "evaluation and are unaffected.",
+                    properties.getModelTimeoutMillis()));
+        } catch (ExecutionException e) {
+            meterRegistry.counter("evaluator.model.failed").increment();
+            log.warn("Model call failed: {}", e.getCause() == null ? e.getMessage()
+                    : e.getCause().getMessage());
+            return NarrativeModel.Narrative.unavailable(
+                    "No narrative was generated: the model call failed (" + e.getMessage()
+                            + "). The score, verdict and findings below are the complete "
+                            + "arithmetic evaluation and are unaffected.");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            meterRegistry.counter("evaluator.model.interrupted").increment();
+            return NarrativeModel.Narrative.unavailable(
+                    "No narrative was generated: the evaluation was interrupted.");
         }
     }
 
-    private String buildArchitectureSummary(List<AggregatedMetricsEvent> metrics) {
-        Map<String, Set<String>> nodeMetrics = new HashMap<>();
-        for (AggregatedMetricsEvent event : metrics) {
-            nodeMetrics.computeIfAbsent(event.getNodeId(), k -> new HashSet<>())
-                    .add(event.getMetricName());
-        }
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("Architecture with ").append(nodeMetrics.size()).append(" nodes:\n");
-        for (Map.Entry<String, Set<String>> entry : nodeMetrics.entrySet()) {
-            sb.append("- Node ").append(entry.getKey())
-                    .append(" with metrics: ").append(entry.getValue()).append("\n");
-        }
-        return sb.toString();
-    }
-
-    private String buildMetricsSummary(List<AggregatedMetricsEvent> metrics) {
-        Map<String, List<Double>> metricValues = new HashMap<>();
-        for (AggregatedMetricsEvent event : metrics) {
-            metricValues.computeIfAbsent(event.getMetricName(), k -> new ArrayList<>())
-                    .add(event.getAvg());
-        }
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("Simulation Metrics Summary:\n");
-        for (Map.Entry<String, List<Double>> entry : metricValues.entrySet()) {
-            double avg = entry.getValue().stream().mapToDouble(Double::doubleValue).average().orElse(0);
-            double max = entry.getValue().stream().mapToDouble(Double::doubleValue).max().orElse(0);
-            sb.append("- ").append(entry.getKey()).append(": avg=").append(String.format("%.2f", avg))
-                    .append(", max=").append(String.format("%.2f", max)).append("\n");
-        }
-        return sb.toString();
-    }
-
-    private List<String> retrieveRelevantKnowledge(String query) {
-        try {
-            return vectorStore.similaritySearch(
-                    org.springframework.ai.vectorstore.SearchRequest.builder()
-                            .query(query)
-                            .topK(maxRagResults)
-                            .build()
-            ).stream()
-                    .map(doc -> doc.getText())
-                    .collect(Collectors.toList());
-        } catch (Exception e) {
-            log.warn("RAG retrieval failed, continuing without references", e);
-            return Collections.emptyList();
-        }
-    }
-
-    private String buildEvaluationPrompt(String architectureSummary, String metricsSummary,
-                                          List<String> references) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("You are a senior distributed systems architect evaluating a system design.\n\n");
-        sb.append("## Architecture\n").append(architectureSummary).append("\n\n");
-        sb.append("## Simulation Results\n").append(metricsSummary).append("\n\n");
-
-        if (!references.isEmpty()) {
-            sb.append("## Reference Architectures\n");
-            for (String ref : references) {
-                sb.append("- ").append(ref).append("\n");
+    /**
+     * Combines the two halves.
+     *
+     * <p>The merge is one-directional by construction: the arithmetic's score, verdict,
+     * bottlenecks and findings are placed first and unconditionally, and the model's
+     * contribution is appended. There is no code path on which the model can alter a
+     * measurement-derived value, so "the model changed the score" is not a bug that can be
+     * introduced later without being noticed here.
+     */
+    private ArchitectureEvaluationEvent merge(SimulationSummaryEvent summary,
+                                              ArchitectureAnalysis analysis,
+                                              NarrativeModel.Narrative narrative,
+                                              List<ArchitectureEvaluationEvent.KnowledgeReference> references,
+                                              String evaluationId,
+                                              long elapsedNanos) {
+        List<ArchitectureEvaluationEvent.Finding> findings = new ArrayList<>(analysis.findings());
+        List<ArchitectureEvaluationEvent.Finding> rejected = new ArrayList<>();
+        for (ArchitectureEvaluationEvent.Finding finding : narrative.additionalFindings()) {
+            if (finding == null || finding.title() == null || finding.title().isBlank()) {
+                rejected.add(finding);
+                continue;
             }
-            sb.append("\n");
+            findings.add(finding);
+        }
+        boolean degraded = narrative.model() == null || "none".equals(narrative.model());
+
+        List<String> summaryText = new ArrayList<>();
+        if (!narrative.summary().isBlank()) {
+            summaryText.add(narrative.summary());
+        }
+        if (!narrative.verdictRationale().isBlank()) {
+            summaryText.add(narrative.verdictRationale());
+        }
+        if (summaryText.isEmpty()) {
+            // Never publish an empty summary. A reader who gets nothing is worse off than one
+            // who gets the arithmetic restated, and an empty string on the page reads as a bug.
+            summaryText.add(String.format(Locale.ROOT,
+                    "Scored %d/100 (%s) across %d component(s) over %d tick(s) under the %s "
+                            + "scenario. %d finding(s) breached a measured threshold and %d "
+                            + "measurement(s) argued for the design.",
+                    analysis.overallScore(), analysis.verdict(), summary.nodeSummaries().size(),
+                    summary.tickCount(), summary.scenario(), analysis.findings().size(),
+                    analysis.strengths().size()));
         }
 
-        sb.append("## Evaluation Criteria\n");
-        sb.append("1. Identify the primary bottleneck based on simulation metrics\n");
-        sb.append("2. Assess fault tolerance and redundancy\n");
-        sb.append("3. Evaluate scalability under load\n");
-        sb.append("4. Identify single points of failure\n");
-        sb.append("5. Provide specific, actionable recommendations\n\n");
-        sb.append("## Response Format\n");
-        sb.append("Provide your evaluation in the following format:\n");
-        sb.append("SCORE: [0-100]\n");
-        sb.append("SUMMARY: [2-3 sentence overall assessment]\n");
-        sb.append("STRENGTHS: [comma-separated list]\n");
-        sb.append("WEAKNESSES: [comma-separated list]\n");
-        sb.append("RECOMMENDATIONS: [comma-separated list]\n");
-
-        return sb.toString();
+        return new ArchitectureEvaluationEvent(
+                UUID.randomUUID().toString(),
+                summary.correlationId(),
+                evaluationId,
+                summary.simulationId(),
+                summary.submissionId(),
+                analysis.overallScore(),
+                analysis.verdict(),
+                String.join(" ", summaryText),
+                analysis.bottlenecks(),
+                findings,
+                analysis.strengths(),
+                analysis.weaknesses(),
+                analysis.recommendations(),
+                references,
+                narrative.model(),
+                elapsedNanos / 1_000_000,
+                narrative.promptTokens(),
+                narrative.completionTokens(),
+                degraded,
+                degraded ? narrative.summary() : null,
+                java.time.Instant.now());
     }
 
-    private EvaluationResult parseEvaluationResponse(String simulationId, String submissionId,
-                                                       String response, List<AggregatedMetricsEvent> metrics,
-                                                       List<String> references) {
-        String score = "50";
-        String summary = "Evaluation completed.";
-        List<String> strengths = new ArrayList<>();
-        List<String> weaknesses = new ArrayList<>();
-        List<String> recommendations = new ArrayList<>();
-
-        for (String line : response.split("\n")) {
-            if (line.startsWith("SCORE:")) {
-                score = line.substring(6).trim();
-            } else if (line.startsWith("SUMMARY:")) {
-                summary = line.substring(8).trim();
-            } else if (line.startsWith("STRENGTHS:")) {
-                strengths = parseList(line.substring(11).trim());
-            } else if (line.startsWith("WEAKNESSES:")) {
-                weaknesses = parseList(line.substring(11).trim());
-            } else if (line.startsWith("RECOMMENDATIONS:")) {
-                recommendations = parseList(line.substring(16).trim());
-            }
-        }
-
-        Map<String, Double> metricsMap = new HashMap<>();
-        for (AggregatedMetricsEvent event : metrics) {
-            metricsMap.put(event.getMetricName(), event.getAvg());
-        }
-
-        return EvaluationResult.builder()
-                .simulationId(simulationId)
-                .submissionId(submissionId)
-                .overallScore(score)
-                .summary(summary)
-                .strengths(strengths)
-                .weaknesses(weaknesses)
-                .recommendations(recommendations)
-                .metrics(metricsMap)
-                .retrievedReferences(references)
-                .evaluatedAt(Instant.now())
-                .build();
-    }
-
-    private List<String> parseList(String value) {
-        if (value == null || value.isBlank()) {
-            return Collections.emptyList();
-        }
-        return Arrays.stream(value.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
-    }
-
-    private void publishResult(EvaluationResult result) {
-        try {
-            String json = objectMapper.writeValueAsString(result);
-            kafkaTemplate.send(evaluationResultsTopic, result.getSimulationId(), json);
-            log.debug("Published evaluation result for simulation: {}", result.getSimulationId());
-        } catch (Exception e) {
-            log.error("Failed to publish evaluation result", e);
-        }
+    ObjectMapper objectMapper() {
+        return objectMapper;
     }
 }

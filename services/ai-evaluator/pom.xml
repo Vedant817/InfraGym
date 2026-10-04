@@ -5,24 +5,37 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.4.1</version>
-        <relativePath/>
+        <groupId>com.archforge</groupId>
+        <artifactId>archforge</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
     </parent>
 
-    <groupId>com.archforge</groupId>
     <artifactId>ai-evaluator</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
-    <name>ai-evaluator</name>
-    <description>AI Evaluation Agent - Spring AI + RAG for architecture evaluation</description>
+    <packaging>jar</packaging>
 
-    <properties>
-        <java.version>21</java.version>
-        <spring-ai.version>1.0.0</spring-ai.version>
-    </properties>
+    <name>ai-evaluator</name>
+    <description>AI Evaluator - grounds a model's architecture critique in the run's measurements</description>
 
     <dependencies>
+        <!--
+          The same reason the telemetry aggregator needed this: this module declared
+          spring-boot-starter-parent as its own parent, so it could not see
+          services/contracts, and grew a private ten-field AggregatedMetricsEvent that
+          matched nothing on the wire. ArchitectureEvaluationEvent (twenty fields,
+          typed overallScore, Severity, Bottleneck, Finding, KnowledgeReference) has
+          been in contracts since it was written and nothing was ever produced against
+          it. The service published a Lombok @Value class of its own instead.
+        -->
+        <dependency>
+            <groupId>com.archforge</groupId>
+            <artifactId>contracts</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.archforge</groupId>
+            <artifactId>messaging</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
@@ -32,13 +45,24 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.kafka</groupId>
             <artifactId>spring-kafka</artifactId>
         </dependency>
+
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
+
+        <!--
+          RAG over the architecture reference library. Optional at runtime: an evaluator
+          whose vector store is unreachable still evaluates, and says so on the record,
+          which is what KnowledgeRetriever does.
+        -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>
@@ -48,6 +72,7 @@
             <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
         </dependency>
+
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
@@ -56,32 +81,35 @@
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
+
         <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <optional>true</optional>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
         </dependency>
 
+        <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.springframework.ai</groupId>
-                <artifactId>spring-ai-bom</artifactId>
-                <version>${spring-ai.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
-
     <build>
+        <finalName>${project.artifactId}</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
@@ -93,20 +121,16 @@
                             <artifactId>lombok</artifactId>
                         </exclude>
                     </excludes>
-                    <classifier>exec</classifier>
                 </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                        </path>
-                    </annotationProcessorPaths>
-                </configuration>
+                <executions>
+                    <execution>
+                        <id>repackage</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

@@ -1,24 +1,49 @@
 spring:
   application:
     name: ai-evaluator
-  ai:
-    openai:
-      api-key: ${OPENAI_API_KEY:}
-      chat:
-        options:
-          model: gpt-4o
-          temperature: 0.7
-  datasource:
-    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/archforge}
-    username: ${POSTGRES_USER:postgres}
-    password: ${POSTGRES_PASSWORD:postgres}
+  # Excluded deliberately, not by accident.
+  #
+  # Spring AI's OpenAiChatAutoConfiguration calls Assert.hasText on the API key while building
+  # its beans, so a missing or blank key is a STARTUP failure. That would make this service
+  # unable to boot without a model credential -- so the deterministic half, which needs no
+  # credential and is the half a reader is asked to trust, would be unavailable exactly when
+  # the model is misconfigured. A misconfigured model should cost the narrative, not the
+  # measurements.
+  #
+  # ModelConfiguration builds the client itself, conditionally. No key -> no client ->
+  # NoModelNarrativeModel -> a complete arithmetic evaluation flagged degraded.
+  #
+  # The embedding and pgvector autoconfigurations are excluded for the same reason: both
+  # require an EmbeddingModel, which requires the key. Reference retrieval reports its own
+  # absence on the published event rather than making the service unbootable.
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiChatAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiEmbeddingAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiImageAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioSpeechAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioTranscriptionAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiModerationAutoConfiguration
+      - org.springframework.ai.model.chat.client.autoconfigure.ChatClientAutoConfiguration
+      - org.springframework.ai.vectorstore.pgvector.autoconfigure.PgVectorStoreAutoConfiguration
+      # This service owns no database. The pgvector starter brings spring-boot-starter-jdbc
+      # transitively, and with it DataSourceAutoConfiguration, which then fails startup with
+      # "Failed to determine a suitable driver class" because there is no datasource URL --
+      # on a service whose entire job is to consume one summary and publish one evaluation.
+      # The dependency is kept so that enabling reference retrieval is a configuration flip
+      # rather than a change to the build, and the DataSource it implies is excluded so its
+      # absence cannot break a service that does not use it.
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
   kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
     consumer:
-      group-id: ai-evaluator-group
+      group-id: ${ARCHFORGE_EVALUATOR_CONSUMER_GROUP:ai-evaluator-group}
+      # earliest: a restarted evaluator must not skip the summaries of runs that finished
+      # while it was down. Those submissions would otherwise sit at AGGREGATING forever with
+      # no error anywhere.
       auto-offset-reset: earliest
-      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        isolation.level: read_committed
 
 server:
   port: ${SERVER_PORT:8084}
@@ -27,20 +52,47 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: when-authorized
 
-ai:
+springdoc:
+  api-docs:
+    path: /api-docs
+
+archforge:
   kafka:
     topics:
-      aggregated-metrics: aggregated.metrics
-      evaluation-results: evaluation.results
-  rag:
-    max-results: 5
-    similarity-threshold: 0.7
+      aggregated-summary: ${TOPIC_AGGREGATED_SUMMARY:aggregated.summary}
+      aggregated-metrics: ${TOPIC_AGGREGATED_METRICS:aggregated.metrics}
+      evaluation-results: ${TOPIC_EVALUATION_RESULTS:evaluation.results}
+      evaluation-lifecycle: ${TOPIC_EVALUATION_LIFECYCLE:evaluation.lifecycle}
+      simulation-lifecycle: ${TOPIC_SIMULATION_LIFECYCLE:simulation.lifecycle}
+  evaluator:
+    consumer-group: ${ARCHFORGE_EVALUATOR_CONSUMER_GROUP:ai-evaluator-group}
+    # Whether to consult a model at all. Off still publishes the full arithmetic evaluation.
+    model-enabled: ${ARCHFORGE_EVALUATOR_MODEL_ENABLED:true}
+    model:
+      # Set from the key's own presence rather than from the key's value, so a variable that
+      # exists but resolved to an empty string does not attempt to build a client -- which is
+      # the failure mode the exclusion above exists to survive.
+      credential-present: ${OPENAI_API_KEY:+true}
+      name: ${OPENAI_MODEL:}
+      temperature: ${ARCHFORGE_EVALUATOR_TEMPERATURE:0.2}
+      max-tokens: ${ARCHFORGE_EVALUATOR_MAX_TOKENS:2000}
+    # The narrative is a bonus on top of an evaluation that is already computed. Bounded so a
+    # slow provider cannot hold up a submission the reader is waiting on.
+    model-timeout-millis: ${ARCHFORGE_EVALUATOR_MODEL_TIMEOUT_MS:20000}
+    rag:
+      # Off by default, and that is a decision: an empty vector store returns nothing, so
+      # enabling it would add an embedding round trip and a Postgres query per evaluation in
+      # exchange for an empty list. It reports its own absence on the published event.
+      enabled: ${ARCHFORGE_EVALUATOR_RAG_ENABLED:false}
+      top-k: ${ARCHFORGE_EVALUATOR_RAG_TOP_K:4}
+      min-similarity: ${ARCHFORGE_EVALUATOR_RAG_MIN_SIMILARITY:0.65}
 
 logging:
   level:
     com.archforge.ai: INFO
+    org.springframework.ai: INFO

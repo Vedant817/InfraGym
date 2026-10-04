@@ -335,8 +335,13 @@ public class SimulationRunService {
             warnings.add("The simulation emitted no telemetry samples; the run produced no measurements.");
         }
 
+        // Ticks executed, then ticks requested. Carried separately so a run stopped by its tick
+        // budget or a wall-clock limit is distinguishable from one that ran to completion:
+        // without the second number a reader of the summary sees "40 ticks" with nothing to
+        // say it was 40 of 60 rather than all 60.
         return new SimulationOutcome(task.simulationId(), task.submissionId(), task.correlationId(),
-                task.scenarioType(), task.seed(), nominal, ticks, task.tickMillis(),
+                task.scenarioType(), task.seed(), nominal, ticks, task.tickCount(),
+                task.tickMillis(),
                 reports, failures, warnings,
                 simulator.totalOffered(), simulator.totalServed(), simulator.totalFailed(),
                 simulator.residualBacklog(),

@@ -53,8 +53,22 @@ public record SimulationSummaryEvent(
         Instant startedAt,
         Instant completedAt,
         long tickCount,
+        long totalTicks,
         long tickMillis,
         List<String> warnings) {
+
+    /**
+     * Ticks the run was asked for, as distinct from the ones it executed.
+     *
+     * <p>Added because "the run was cut short" was unrepresentable on this event. The engine
+     * can abandon a run before its last tick -- a tick budget, a wall-clock limit, a
+     * shutdown -- and it records that in the terminal lifecycle event, but this event is what
+     * the evaluator and the design service read, and without the requested total they could
+     * see {@code tickCount: 40} with nothing to say it was 40 of 60 rather than all 60. A
+     * reader of a truncated run otherwise has no way to distinguish a short measurement from
+     * a complete one, which is the same failure as a partial telemetry trace being
+     * indistinguishable from a whole one.
+     */
 
     /** One injected failure and what it actually did. Evidence, not intent. */
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -110,7 +124,7 @@ public record SimulationSummaryEvent(
      * Architecture-wide figures.
      *
      * <p>The three request totals are the accounting identity and are named for it:
-     * {@code totalOffered == totalServed + totalErrors + backlogedRequests}. The field was
+     * {@code totalOffered == totalServed + totalErrors + backloggedRequests}. The field was
      * previously called {@code droppedRequests} and carried
      * {@code offered - served - errors}, which is the residual backlog — so a run with
      * 1 653 requests still queued behind a slow consumer published them as 1 653
@@ -129,7 +143,7 @@ public record SimulationSummaryEvent(
             double offeredThroughputRps,
             double totalRequests,
             double totalErrors,
-            double backlogedRequests,
+            double backloggedRequests,
             int saturatedNodeCount,
             double meanRecoveryTimeMs) {
 
@@ -186,7 +200,7 @@ public record SimulationSummaryEvent(
         combined.add(warning);
         return new SimulationSummaryEvent(simulationId, submissionId, correlationId, scenario,
                 architecture, failures, nodeSummaries, totals, windowAggregates, graphMetrics,
-                startedAt, completedAt, tickCount, tickMillis, combined);
+                startedAt, completedAt, tickCount, totalTicks, tickMillis, combined);
     }
 
     public ScenarioType scenarioType() {

@@ -26,6 +26,9 @@ import java.util.List;
  * @param seed            the seed every random draw came from
  * @param nominalRps      the graph's own sustainable capacity
  * @param tickCount       ticks executed
+ * @param totalTicks      ticks the run was asked for, so a truncated run is distinguishable
+ *                        from a complete one; equal to {@code tickCount} unless the run was
+ *                        cut short by its tick budget or a wall-clock limit
  * @param tickMillis      simulated time per tick
  * @param nodeReports     per-component results
  * @param failures        the failure plan as executed
@@ -47,6 +50,7 @@ public record SimulationOutcome(
         long seed,
         double nominalRps,
         long tickCount,
+        long totalTicks,
         long tickMillis,
         List<NodeReport> nodeReports,
         List<FailureInjector.Failure> failures,
@@ -71,6 +75,22 @@ public record SimulationOutcome(
         if (completedAt == null) {
             completedAt = startedAt;
         }
+        if (totalTicks <= 0) {
+            // A zero here would read as "no ticks were requested", which is a different and
+            // wrong statement; a caller that simply did not supply the value means the run
+            // completed.
+            totalTicks = tickCount;
+        }
+        if (totalTicks < tickCount) {
+            throw new IllegalArgumentException(
+                    "totalTicks (" + totalTicks + ") cannot be below tickCount (" + tickCount
+                            + "): a run cannot execute more ticks than it was asked for.");
+        }
+    }
+
+    /** Whether the run stopped before the tick it was asked to execute. */
+    public boolean truncated() {
+        return tickCount < totalTicks;
     }
 
     /**
@@ -85,7 +105,8 @@ public record SimulationOutcome(
         List<String> combined = new ArrayList<>(warnings);
         combined.add(warning);
         return new SimulationOutcome(simulationId, submissionId, correlationId, scenario, seed,
-                nominalRps, tickCount, tickMillis, nodeReports, failures, List.copyOf(combined),
+                nominalRps, tickCount, totalTicks, tickMillis, nodeReports, failures,
+                List.copyOf(combined),
                 totalOffered, totalServed, totalFailed, residualBacklog,
                 graph, workload, startedAt, completedAt);
     }
@@ -248,6 +269,7 @@ public record SimulationOutcome(
                 startedAt,
                 completedAt,
                 tickCount,
+                totalTicks,
                 tickMillis,
                 warnings);
     }

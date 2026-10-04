@@ -252,7 +252,7 @@ class ContractSerializationTest {
                 new SimulationSummaryEvent.Totals(5, 25, 85, 0.002, 0.05, 400, 400,
                         24000, 48, 0, 1, 5000),
                 List.of(), java.util.Map.of("criticalPathLength", 3L),
-                Instant.now(), Instant.now(), 60, 1000,
+                Instant.now(), Instant.now(), 60, 60, 1000,
                 List.of("partial trace: 400 of 3000 samples were dropped"));
 
         SimulationSummaryEvent parsed = mapper.readValue(
@@ -293,7 +293,7 @@ class ContractSerializationTest {
         SimulationSummaryEvent summary = new SimulationSummaryEvent(
                 "sim-2", "sub-2", "corr-2", "normal",
                 null, List.of(), List.of(), null, List.of(), java.util.Map.of(),
-                Instant.now(), Instant.now(), 60, 1000, null);
+                Instant.now(), Instant.now(), 60, 60, 1000, null);
 
         assertThat(summary.warnings()).isEmpty();
     }
