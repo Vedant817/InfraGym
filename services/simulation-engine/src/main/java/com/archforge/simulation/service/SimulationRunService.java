@@ -180,7 +180,7 @@ public class SimulationRunService {
             publishLifecycle(task, SimulationStatus.COMPLETED,
                     "Completed " + ticks + " ticks; worst P99 "
                             + Math.round(outcome.worstNodeP99Ms()) + " ms",
-                    ticks, ticks, completeness(emitted.get(), totalDropped));
+                    ticks, ticks, accounting(outcome, completeness(emitted.get(), totalDropped)));
             releaseDropAccounting(task);
 
             if (totalDropped > 0) {
@@ -411,6 +411,30 @@ public class SimulationRunService {
         details.put("telemetrySamplesDropped", dropped);
         details.put("telemetryComplete", dropped == 0);
         return details;
+    }
+
+    /**
+     * The run's accounting identity, published with its terminal event.
+     *
+     * <p>Carried here rather than left for the aggregator to reconstruct, because it cannot:
+     * the aggregator sees per-tick samples, and the four terms are accumulated in three
+     * different places in the engine (offered at the graph's roots, served where requests
+     * end, failures at every node). A downstream service recomputing them from samples gets
+     * a different answer and has no way to tell that the engine's is the right one.
+     *
+     * <p>Published alongside {@code telemetryComplete} because the two answer the same
+     * question from different directions — is the <em>trace</em> complete, and do the
+     * <em>numbers</em> add up.
+     */
+    private static Map<String, Object> accounting(SimulationOutcome outcome, Map<String, Object> details) {
+        Map<String, Object> all = new LinkedHashMap<>(details);
+        all.put("offeredRequests", outcome.totalOffered());
+        all.put("servedRequests", outcome.totalServed());
+        all.put("failedRequests", outcome.totalFailed());
+        all.put("backloggedRequests", outcome.residualBacklog());
+        all.put("completionRate", outcome.completionRate());
+        all.put("reconciles", outcome.reconciles());
+        return all;
     }
 
     /**

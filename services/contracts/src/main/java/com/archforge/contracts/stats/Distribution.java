@@ -1,21 +1,28 @@
-package com.archforge.simulation.engine;
+package com.archforge.contracts.stats;
 
 import java.util.Arrays;
 
 /**
  * Percentiles over a sample set, plus the summary statistics the evaluator needs.
  *
- * <p><b>Why this exists.</b> The README promises P95 and P99 latency and builds an entire
- * worked example around a P99 of 850 ms. The aggregator accumulated only min/max/avg —
- * there was no percentile anywhere in the pipeline — so any tail-latency assessment was
- * hallucinated. Max is not a substitute: it is a different statistic, and reporting it
- * as though it described the tail is how a design with one 3-second outlier looks
- * identical to one that is uniformly slow.
+ * <p><b>Why this exists, and why it lives in contracts.</b> The README promises P95 and
+ * P99 latency and builds a worked example around a P99 of 850 ms. The aggregator used to
+ * accumulate only min/max/avg — there was no percentile anywhere in the pipeline — so any
+ * tail-latency assessment was hallucinated. Max is not a substitute: it is a different
+ * statistic, and reporting it as though it described the tail is how a design with one
+ * 3-second outlier looks identical to one that is uniformly slow.
  *
- * <p>Percentiles use the nearest-rank method on a sorted copy. It needs no histogram
- * or quantile sketch, is exact for the sample set at hand, and returns an observed
- * value rather than an interpolated one — which is what a reader expects when the
- * report says "the P99 you observed was 840 ms".
+ * <p>It is here rather than in either service because the engine computes a component's
+ * percentiles over its own run and the aggregator computes them over the same samples
+ * again from {@code simulation.telemetry}. If the two implementations differ in method,
+ * interpolation or tie-breaking, the per-node figure in the run summary and the charted
+ * series for the same component disagree — and a reader comparing them has no way to tell
+ * which is right. One implementation, so they cannot.
+ *
+ * <p>Percentiles use the nearest-rank method on a sorted copy. It needs no histogram or
+ * quantile sketch, is exact for the sample set at hand, and returns an observed value
+ * rather than an interpolated one — which is what a reader expects when the report says
+ * "the P99 you observed was 840 ms".
  */
 public final class Distribution {
 
@@ -30,8 +37,8 @@ public final class Distribution {
     }
 
     /**
-     * @param samples latency samples in milliseconds; the array is copied and sorted,
-     *                so the caller's array is untouched
+     * @param samples samples in the metric's own unit; the array is copied and sorted, so
+     *                the caller's array is untouched
      */
     public static Distribution of(double[] samples) {
         if (samples == null || samples.length == 0) {
@@ -69,7 +76,13 @@ public final class Distribution {
         return sorted.length == 0 ? 0 : sum / sorted.length;
     }
 
-    /** Population standard deviation; 0 for fewer than two samples. */
+    /**
+     * Population standard deviation; 0 for fewer than two samples.
+     *
+     * <p>Population, not sample: the samples here are the run, not a draw from a larger
+     * population, so dividing by n rather than n-1 is the honest answer for "how much did
+     * this run's values vary".
+     */
     public double stdDev() {
         if (sorted.length < 2) {
             return 0;
@@ -111,8 +124,8 @@ public final class Distribution {
     /**
      * Fraction of samples at or below a threshold.
      *
-     * <p>The error-rate companion to the percentiles: a design can have a healthy P99
-     * and still fail 8% of requests, and only the distribution shows both.
+     * <p>The error-rate companion to the percentiles: a design can have a healthy P99 and
+     * still fail 8% of requests, and only the distribution shows both.
      */
     public double fractionAtOrBelow(double threshold) {
         if (sorted.length == 0) {

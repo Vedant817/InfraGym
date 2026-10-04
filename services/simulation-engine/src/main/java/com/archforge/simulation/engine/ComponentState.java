@@ -1,5 +1,7 @@
 package com.archforge.simulation.engine;
 
+import com.archforge.contracts.stats.Distribution;
+
 import com.archforge.contracts.canvas.NodeType;
 import com.archforge.contracts.graph.CompiledNode;
 import lombok.Getter;

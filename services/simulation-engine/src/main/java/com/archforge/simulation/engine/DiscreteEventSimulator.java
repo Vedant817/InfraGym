@@ -1,5 +1,7 @@
 package com.archforge.simulation.engine;
 
+import com.archforge.contracts.stats.Distribution;
+
 import com.archforge.contracts.graph.CompiledEdge;
 import com.archforge.contracts.graph.CompiledGraph;
 import com.archforge.contracts.graph.CompiledNode;

@@ -2,14 +2,16 @@ spring:
   application:
     name: telemetry-aggregator
   kafka:
-    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
-    streams:
-      application-id: telemetry-aggregator
-      bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    consumer:
+      group-id: ${ARCHFORGE_AGGREGATOR_CONSUMER_GROUP:telemetry-aggregator-group}
+      # earliest, not latest: a freshly submitted design's samples must not be discarded
+      # because this consumer had not polled yet when they were produced. Every other
+      # service in the pipeline already defaults this way; this one did not, so a
+      # freshly-restarted aggregator silently skipped every run in flight.
+      auto-offset-reset: earliest
       properties:
-        default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
-        default.value.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
-        processing.guarantee: exactly_once_v2
+        isolation.level: read_committed
 
 server:
   port: ${SERVER_PORT:8083}
@@ -18,19 +20,49 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: when-authorized
 
-telemetry:
+archforge:
   kafka:
     topics:
-      simulation-telemetry: simulation.telemetry
-      aggregated-metrics: aggregated.metrics
-  aggregation:
-    window-size-seconds: 10
-    window-grace-seconds: 5
+      simulation-telemetry: ${TOPIC_SIMULATION_TELEMETRY:simulation.telemetry}
+      simulation-lifecycle: ${TOPIC_SIMULATION_LIFECYCLE:simulation.lifecycle}
+      design-submissions: ${TOPIC_DESIGN_SUBMISSIONS:design.submissions}
+      design-updates: ${TOPIC_DESIGN_UPDATES:design.updates}
+      submission-lifecycle: ${TOPIC_SUBMISSION_LIFECYCLE:submission.lifecycle}
+      simulation-tasks: ${TOPIC_SIMULATION_TASKS:simulation.tasks}
+      aggregated-metrics: ${TOPIC_AGGREGATED_METRICS:aggregated.metrics}
+      aggregated-summary: ${TOPIC_AGGREGATED_SUMMARY:aggregated.summary}
+      evaluation-results: ${TOPIC_EVALUATION_RESULTS:evaluation.results}
+      evaluation-lifecycle: ${TOPIC_EVALUATION_LIFECYCLE:evaluation.lifecycle}
+      design-submissions-dlt: ${TOPIC_DESIGN_SUBMISSIONS_DLT:design.submissions.dlt}
+      simulation-tasks-dlt: ${TOPIC_SIMULATION_TASKS_DLT:simulation.tasks.dlt}
+      simulation-telemetry-dlt: ${TOPIC_SIMULATION_TELEMETRY_DLT:simulation.telemetry.dlt}
+      aggregated-metrics-dlt: ${TOPIC_AGGREGATED_METRICS_DLT:aggregated.metrics.dlt}
+      evaluation-results-dlt: ${TOPIC_EVALUATION_RESULTS_DLT:evaluation.results.dlt}
+      submission-lifecycle-dlt: ${TOPIC_SUBMISSION_LIFECYCLE_DLT:submission.lifecycle.dlt}
+    listener:
+      concurrency: ${ARCHFORGE_KAFKA_CONCURRENCY:2}
+  aggregator:
+    consumer-group: ${ARCHFORGE_AGGREGATOR_CONSUMER_GROUP:telemetry-aggregator-group}
+    # Ticks per window, not seconds. A 60-tick run at a 1s tick executes in ~350ms of wall
+    # clock, so wall-clock windows put the entire run in one bucket and every chart is a
+    # flat line; see TickWindow for the rest.
+    window-size-ticks: ${ARCHFORGE_AGGREGATOR_WINDOW_TICKS:10}
+    tick-millis: ${ARCHFORGE_SIMULATION_TICK_MILLIS:1000}
+    # How long a COMPLETED event waits for the run's last samples. The engine flushes and
+    # waits for the broker before publishing COMPLETED, but two consumers on two topics
+    # have no ordering relationship, so the roll-up would otherwise be built mid-arrival.
+    terminal-grace-millis: ${ARCHFORGE_AGGREGATOR_TERMINAL_GRACE_MS:2000}
+    parked-sweep-millis: ${ARCHFORGE_AGGREGATOR_PARKED_SWEEP_MS:500}
+    max-in-flight-runs: ${ARCHFORGE_AGGREGATOR_MAX_IN_FLIGHT:256}
+    max-parked-terminals: ${ARCHFORGE_AGGREGATOR_MAX_PARKED:256}
+    aggregated-metrics-topic: ${TOPIC_AGGREGATED_METRICS:aggregated.metrics}
+    aggregated-summary-topic: ${TOPIC_AGGREGATED_SUMMARY:aggregated.summary}
+    publish-summary: ${ARCHFORGE_AGGREGATOR_PUBLISH_SUMMARY:true}
 
 logging:
   level:

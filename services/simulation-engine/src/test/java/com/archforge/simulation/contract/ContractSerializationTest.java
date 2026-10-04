@@ -252,7 +252,8 @@ class ContractSerializationTest {
                 new SimulationSummaryEvent.Totals(5, 25, 85, 0.002, 0.05, 400, 400,
                         24000, 48, 0, 1, 5000),
                 List.of(), java.util.Map.of("criticalPathLength", 3L),
-                Instant.now(), Instant.now(), 60, 1000);
+                Instant.now(), Instant.now(), 60, 1000,
+                List.of("partial trace: 400 of 3000 samples were dropped"));
 
         SimulationSummaryEvent parsed = mapper.readValue(
                 mapper.writeValueAsString(original), SimulationSummaryEvent.class);
@@ -274,6 +275,27 @@ class ContractSerializationTest {
             softly.assertThat(parsed.node("db")).isNotNull();
             softly.assertThat(parsed.graphMetrics()).containsKey("criticalPathLength");
         });
+
+        // The caveat has to survive the wire. It is the one field that tells a reader the
+        // percentiles above were computed from a fraction of the run, so an event that
+        // dropped it on serialisation would be worse than one that never had it.
+        assertThat(parsed.warnings())
+                .as("a partial trace's warning must reach the consumer")
+                .containsExactly("partial trace: 400 of 3000 samples were dropped");
+    }
+
+    @Test
+    @DisplayName("a summary built with no warnings reads as no warnings")
+    void absentWarningsMeansNone() {
+        // Absent is not the same as "unverified". A summary that cannot say its trace was
+        // complete must not default to claiming it was -- the default that made a partial
+        // trace indistinguishable from a whole one.
+        SimulationSummaryEvent summary = new SimulationSummaryEvent(
+                "sim-2", "sub-2", "corr-2", "normal",
+                null, List.of(), List.of(), null, List.of(), java.util.Map.of(),
+                Instant.now(), Instant.now(), 60, 1000, null);
+
+        assertThat(summary.warnings()).isEmpty();
     }
 
     @Test

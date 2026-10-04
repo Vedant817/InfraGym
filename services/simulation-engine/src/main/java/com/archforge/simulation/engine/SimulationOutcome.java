@@ -229,6 +229,11 @@ public record SimulationOutcome(
                         .average()
                         .orElse(0));
 
+        // The engine's own projection of its run. Its warnings travel with it, which matters most
+        // when the trace was partial: this event is what the REST endpoint and the
+        // aggregator's comparison both read, and a reader who saw only these numbers would
+        // otherwise have no way to know the percentiles were computed from a fraction of the
+        // samples.
         return new SimulationSummaryEvent(
                 simulationId,
                 submissionId,
@@ -243,6 +248,7 @@ public record SimulationOutcome(
                 startedAt,
                 completedAt,
                 tickCount,
-                tickMillis);
+                tickMillis,
+                warnings);
     }
 }
