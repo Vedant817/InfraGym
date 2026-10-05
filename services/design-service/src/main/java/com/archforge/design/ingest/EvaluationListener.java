@@ -61,6 +61,7 @@ public class EvaluationListener {
             groupId = "${archforge.design.consumer-group:design-service-group}",
             containerFactory = "archforgeKafkaListenerContainerFactory"
     )
+    @Transactional
     public void onResult(String payload) {
         if (payload == null || payload.isBlank()) {
             return;
@@ -80,13 +81,16 @@ public class EvaluationListener {
         apply(event);
     }
 
-    @Transactional
     void apply(ArchitectureEvaluationEvent event) {
-        if (submissions.findById(parseUuid(event.submissionId())).isEmpty()) {
+        var submission = submissions.findByIdForUpdate(parseUuid(event.submissionId())).orElse(null);
+        if (submission == null) {
             meterRegistry.counter("design.evaluation.orphan").increment();
             log.warn("Evaluation {} references unknown submission {}", event.evaluationId(),
                     parseUuid(event.submissionId()));
             return;
+        }
+        if (!submission.attachSimulation(parseUuid(event.simulationId()))) {
+            throw new IllegalArgumentException("Evaluation simulation does not match the submission's simulation");
         }
 
         UUID evaluationId = parseUuid(event.evaluationId());
@@ -115,6 +119,11 @@ public class EvaluationListener {
                 event.degradedReason(),
                 event.evaluatedAt() == null ? java.time.Instant.now() : event.evaluatedAt()));
 
+        // A completion signal alone can precede evaluation.results. Mark complete
+        // only after the verdict itself has been stored in this transaction.
+        submission.transitionTo(com.archforge.contracts.lifecycle.SubmissionStatus.COMPLETED);
+        submissions.save(submission);
+
         meterRegistry.counter("design.evaluation.recorded", "verdict", event.verdict()).increment();
         if (event.degraded()) {
             meterRegistry.counter("design.evaluation.degraded").increment();
@@ -129,6 +138,7 @@ public class EvaluationListener {
             groupId = "${archforge.design.consumer-group:design-service-group}",
             containerFactory = "archforgeKafkaListenerContainerFactory"
     )
+    @Transactional
     public void onEvaluationLifecycle(String payload) {
         if (payload == null || payload.isBlank()) {
             return;
@@ -158,6 +168,15 @@ public class EvaluationListener {
         if (appended > 0) {
             meterRegistry.counter("design.evaluation_lifecycle.recorded", "status", event.status())
                     .increment();
+            var submission = submissions.findByIdForUpdate(parseUuid(event.submissionId())).orElse(null);
+            if (submission != null) {
+                if (EvaluationLifecycleEvent.STATUS_STARTED.equals(event.status())) {
+                    submission.transitionTo(com.archforge.contracts.lifecycle.SubmissionStatus.EVALUATING);
+                } else if (EvaluationLifecycleEvent.STATUS_FAILED.equals(event.status())) {
+                    submission.transitionTo(com.archforge.contracts.lifecycle.SubmissionStatus.FAILED);
+                }
+                submissions.save(submission);
+            }
         }
     }
 

@@ -61,6 +61,7 @@ public class SimulationSummaryListener {
             groupId = "${archforge.design.consumer-group:design-service-group}",
             containerFactory = "archforgeKafkaListenerContainerFactory"
     )
+    @Transactional
     public void onSummary(String payload) {
         if (payload == null || payload.isBlank()) {
             return;
@@ -80,16 +81,22 @@ public class SimulationSummaryListener {
         apply(summary);
     }
 
-    @Transactional
     void apply(SimulationSummaryEvent summary) {
         UUID simulationId = parseUuid(summary.simulationId());
-        if (simulations.findById(simulationId).isEmpty()) {
+        UUID submissionId = parseUuid(summary.submissionId());
+        var submission = submissionId == null ? null
+                : submissions.findByIdForUpdate(submissionId).orElse(null);
+        if (submission == null || simulationId == null) {
             meterRegistry.counter("design.summary.orphan").increment();
             log.warn("Simulation summary {} has no submission to attach to", simulationId);
             return;
         }
 
-        SimulationEntity simulation = simulations.findById(simulationId).orElseThrow();
+        if (!submission.attachSimulation(simulationId)) {
+            throw new IllegalArgumentException("Summary simulation does not match the submission's simulation");
+        }
+        SimulationEntity simulation = simulations.findById(simulationId)
+                .orElseGet(() -> SimulationEntity.of(simulationId, submission.getId(), summary.scenario()));
         SimulationSummaryEvent.Totals totals = summary.totals();
         double offered = totals == null ? 0 : totals.totalRequests();
         double failed = totals == null ? 0 : totals.totalErrors();
@@ -106,7 +113,11 @@ public class SimulationSummaryListener {
                 failed, queued,
                 json(summary.warnings()), json(summary.graphMetrics()),
                 summary.startedAt(), summary.completedAt());
-        simulations.save(simulation);
+        // JDBC metric batches use this transaction's connection but do not cause
+        // Hibernate to flush. Insert the parent before their foreign-key checks.
+        simulations.saveAndFlush(simulation);
+        submission.transitionTo(com.archforge.contracts.lifecycle.SubmissionStatus.AGGREGATING);
+        submissions.save(submission);
 
         List<NodeMetric> nodeRows = summary.nodeSummaries().stream()
                 .map(node -> NodeMetric.of(simulationId, node))

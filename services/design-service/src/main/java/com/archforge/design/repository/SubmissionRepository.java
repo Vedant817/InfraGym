@@ -18,6 +18,11 @@ import java.util.UUID;
  */
 public interface SubmissionRepository extends JpaRepository<SubmissionEntity, UUID> {
 
+    /** Serialize projections from separate Kafka topics within their transactions. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query("SELECT s FROM SubmissionEntity s WHERE s.id = :id")
+    Optional<SubmissionEntity> findByIdForUpdate(@org.springframework.data.repository.query.Param("id") UUID id);
+
     List<SubmissionEntity> findByUserIdOrderBySubmittedAtDesc(String userId, Pageable pageable);
 
     Optional<SubmissionEntity> findByIdAndUserId(UUID id, String userId);

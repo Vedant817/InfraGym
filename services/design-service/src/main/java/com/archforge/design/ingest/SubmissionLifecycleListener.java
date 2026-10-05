@@ -55,6 +55,7 @@ public class SubmissionLifecycleListener {
             groupId = "${archforge.design.consumer-group:design-service-group}",
             containerFactory = "archforgeKafkaListenerContainerFactory"
     )
+    @Transactional
     public void onLifecycle(String payload) {
         if (payload == null || payload.isBlank()) {
             return;
@@ -74,7 +75,6 @@ public class SubmissionLifecycleListener {
         apply(event);
     }
 
-    @Transactional
     void apply(SubmissionLifecycleEvent event) {
         UUID submissionId = parseUuid(event.submissionId());
         UUID eventId = parseUuid(event.eventId());
@@ -85,8 +85,7 @@ public class SubmissionLifecycleListener {
                 parseUuid(event.simulationId()),
                 parseUuid(event.correlationId()),
                 event.stage(),
-                SubmissionStatus.findByValue(event.stage()) == null
-                        ? null : SubmissionStatus.findByValue(event.stage()).getValue(),
+                event.status().getValue(),
                 event.message(),
                 json(event.details()),
                 event.occurredAt() == null ? java.time.Instant.now() : event.occurredAt());
@@ -99,7 +98,7 @@ public class SubmissionLifecycleListener {
         }
         meterRegistry.counter("design.lifecycle.recorded").increment();
 
-        SubmissionEntity submission = submissions.findById(submissionId).orElse(null);
+        SubmissionEntity submission = submissions.findByIdForUpdate(submissionId).orElse(null);
         if (submission == null) {
             // The row is created by the REST call that submitted it. An event for a
             // submission this service has never heard of is either a replay from a restored
@@ -113,7 +112,7 @@ public class SubmissionLifecycleListener {
         }
 
         submission.attachSimulation(parseUuid(event.simulationId()));
-        SubmissionStatus next = SubmissionStatus.findByValue(event.stage());
+        SubmissionStatus next = event.status();
         if (next != null && submission.transitionTo(next)) {
             meterRegistry.counter("design.submission.status", "status", next.getValue())
                     .increment();

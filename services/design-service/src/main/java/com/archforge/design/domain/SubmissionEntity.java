@@ -132,6 +132,11 @@ public class SubmissionEntity {
         if (this.status.isTerminal()) {
             return false;
         }
+        // Different Kafka topics can arrive out of order. Allow forward jumps
+        // when an intermediate event was missed, but never rewind progress.
+        if (!next.isTerminal() && next.ordinal() <= this.status.ordinal()) {
+            return false;
+        }
         this.status = next;
         if (next.isTerminal()) {
             this.completedAt = Instant.now();
