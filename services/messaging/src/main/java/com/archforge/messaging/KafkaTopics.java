@@ -33,6 +33,10 @@ public class KafkaTopics {
 
     private final String designSubmissionsDlt;
     private final String simulationTasksDlt;
+    private final String simulationLifecycleDlt;
+    private final String aggregatedSummaryDlt;
+    private final String evaluationLifecycleDlt;
+    private final String designUpdatesDlt;
     private final String simulationTelemetryDlt;
     private final String aggregatedMetricsDlt;
     private final String evaluationResultsDlt;
@@ -51,6 +55,10 @@ public class KafkaTopics {
             @Value("${archforge.topics.evaluation-lifecycle:" + TopicNames.EVALUATION_LIFECYCLE + "}") String evaluationLifecycle,
             @Value("${archforge.topics.design-submissions-dlt:" + TopicNames.DESIGN_SUBMISSIONS_DLT + "}") String designSubmissionsDlt,
             @Value("${archforge.topics.simulation-tasks-dlt:" + TopicNames.SIMULATION_TASKS_DLT + "}") String simulationTasksDlt,
+        @Value("${archforge.topics.simulation-lifecycle-dlt:" + TopicNames.SIMULATION_LIFECYCLE_DLT + "}") String simulationLifecycleDlt,
+        @Value("${archforge.topics.aggregated-summary-dlt:" + TopicNames.AGGREGATED_SUMMARY_DLT + "}") String aggregatedSummaryDlt,
+        @Value("${archforge.topics.evaluation-lifecycle-dlt:" + TopicNames.EVALUATION_LIFECYCLE_DLT + "}") String evaluationLifecycleDlt,
+        @Value("${archforge.topics.design-updates-dlt:" + TopicNames.DESIGN_UPDATES_DLT + "}") String designUpdatesDlt,
             @Value("${archforge.topics.simulation-telemetry-dlt:" + TopicNames.SIMULATION_TELEMETRY_DLT + "}") String simulationTelemetryDlt,
             @Value("${archforge.topics.aggregated-metrics-dlt:" + TopicNames.AGGREGATED_METRICS_DLT + "}") String aggregatedMetricsDlt,
             @Value("${archforge.topics.evaluation-results-dlt:" + TopicNames.EVALUATION_RESULTS_DLT + "}") String evaluationResultsDlt,
@@ -67,6 +75,10 @@ public class KafkaTopics {
         this.evaluationLifecycle = evaluationLifecycle;
         this.designSubmissionsDlt = designSubmissionsDlt;
         this.simulationTasksDlt = simulationTasksDlt;
+        this.simulationLifecycleDlt = simulationLifecycleDlt;
+        this.aggregatedSummaryDlt = aggregatedSummaryDlt;
+        this.evaluationLifecycleDlt = evaluationLifecycleDlt;
+        this.designUpdatesDlt = designUpdatesDlt;
         this.simulationTelemetryDlt = simulationTelemetryDlt;
         this.aggregatedMetricsDlt = aggregatedMetricsDlt;
         this.evaluationResultsDlt = evaluationResultsDlt;
@@ -117,6 +129,22 @@ public class KafkaTopics {
         return designSubmissionsDlt;
     }
 
+    public String simulationLifecycleDlt() {
+        return simulationLifecycleDlt;
+    }
+
+    public String aggregatedSummaryDlt() {
+        return aggregatedSummaryDlt;
+    }
+
+    public String evaluationLifecycleDlt() {
+        return evaluationLifecycleDlt;
+    }
+
+    public String designUpdatesDlt() {
+        return designUpdatesDlt;
+    }
+
     public String simulationTasksDlt() {
         return simulationTasksDlt;
     }
@@ -135,6 +163,49 @@ public class KafkaTopics {
 
     public String submissionLifecycleDlt() {
         return submissionLifecycleDlt;
+    }
+
+    /**
+     * Every topic resolved to its contract name, with no configuration.
+     *
+     * <p>Exists because this class has twenty constructor parameters and tests construct it
+     * positionally. Adding the five dead-letter topics that {@code simulation.lifecycle},
+     * {@code aggregated.summary}, {@code evaluation.lifecycle} and {@code design.updates}
+     * needed broke both call sites that spelled out all seventeen previous names -- and the
+     * failure was an arity error in a test, which says nothing about what broke or why.
+     *
+     * <p>The deeper problem is duplication, not arity. A test that hard-codes topic names
+     * asserts against a second copy of the catalogue, and a second copy is exactly what
+     * drifts: the test would keep passing while the broker was configured from
+     * {@code topics.conf} and the two disagreed. Deriving every name from
+     * {@link TopicNames} makes that impossible -- adding a topic is a one-line change here
+     * and in the contract, and no test can be left behind.
+     *
+     * <p>Overrides are still the normal path; this is for a test or a tool that wants the
+     * contract names without a Spring context.
+     */
+    public static KafkaTopics withContractNames() {
+        return new KafkaTopics(
+                TopicNames.DESIGN_SUBMISSIONS,
+                TopicNames.DESIGN_UPDATES,
+                TopicNames.SUBMISSION_LIFECYCLE,
+                TopicNames.SIMULATION_TASKS,
+                TopicNames.SIMULATION_TELEMETRY,
+                TopicNames.SIMULATION_LIFECYCLE,
+                TopicNames.AGGREGATED_METRICS,
+                TopicNames.AGGREGATED_SUMMARY,
+                TopicNames.EVALUATION_RESULTS,
+                TopicNames.EVALUATION_LIFECYCLE,
+                TopicNames.DESIGN_SUBMISSIONS_DLT,
+                TopicNames.SIMULATION_TASKS_DLT,
+                TopicNames.SIMULATION_LIFECYCLE_DLT,
+                TopicNames.AGGREGATED_SUMMARY_DLT,
+                TopicNames.EVALUATION_LIFECYCLE_DLT,
+                TopicNames.DESIGN_UPDATES_DLT,
+                TopicNames.SIMULATION_TELEMETRY_DLT,
+                TopicNames.AGGREGATED_METRICS_DLT,
+                TopicNames.EVALUATION_RESULTS_DLT,
+                TopicNames.SUBMISSION_LIFECYCLE_DLT);
     }
 
     /**

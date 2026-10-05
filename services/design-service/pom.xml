@@ -22,9 +22,22 @@
     </description>
 
     <dependencies>
+        <!--
+          messaging, not just contracts. Without it there is no KafkaTopics, no
+          archforgeKafkaListenerContainerFactory at AckMode.RECORD, no
+          DeadLetterPublishingRecoverer whose resolver calls topics.deadLetterFor,
+          and no SubmissionLifecyclePublisher, so the first @KafkaListener written
+          here would be forced to hand-roll its own container factory and error
+          handler, which is the duplication that historically used MANUAL acks and
+          left offsets uncommitted even after a dead letter.
+        -->
         <dependency>
             <groupId>com.archforge</groupId>
             <artifactId>contracts</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.archforge</groupId>
+            <artifactId>messaging</artifactId>
         </dependency>
 
         <dependency>
@@ -38,6 +51,15 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!--
+          This is the service that holds one user's designs and submissions, so it is
+          the one place a missing authorization dependency would be a data leak rather
+          than a convenience. Every read is filtered by the authenticated principal.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -78,6 +100,20 @@
         </dependency>
 
         <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+        </dependency>
+
+        <!-- Test -->
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
@@ -97,5 +133,47 @@
             <artifactId>mongodb</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <build>
+        <!--
+          finalName and the repackage re-enable are both load-bearing, and both were
+          missing. Without finalName the artifact is design-service-0.1.0-SNAPSHOT.jar,
+          so a Dockerfile or run script written to the fleet's documented
+          target/<artifactId>.jar path finds nothing. Without repackage the build
+          succeeds, CI is green, and the deploy step fails at `java -jar` with "no main
+          manifest attribute", because the reactor's parent disables repackage so
+          that library modules stay as plain jars, and a runnable service has to turn
+          it back on. Both were verified against services/graph-compiler/pom.xml.
+        -->
+        <finalName>${project.artifactId}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>repackage</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

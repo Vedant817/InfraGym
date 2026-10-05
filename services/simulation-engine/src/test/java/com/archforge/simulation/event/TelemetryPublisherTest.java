@@ -53,6 +53,7 @@ class TelemetryPublisherTest {
         @Override
         public int send(String topic, List<TelemetryEvent> events) {
             batches.incrementAndGet();
+            topicsSeen.add(topic);
             CountDownLatch gate = entered;
             if (gate != null) {
                 gate.countDown();
@@ -75,16 +76,26 @@ class TelemetryPublisherTest {
             acceptedTotal.addAndGet(accepted);
             return accepted;
         }
+
+        /**
+         * Every topic this sender was asked to publish to.
+         *
+         * <p>Recorded because the test that publishes 200 samples was named "sends every
+         * sample to the telemetry topic" and never checked the topic. A publisher that sent
+         * every sample faithfully to the wrong topic -- to a lifecycle topic, to a DLQ, to
+         * itself -- would have passed: the sample count, the ordering and the node ids were
+         * all correct, and the aggregator consumes a different topic, so the samples would
+         * simply never have been read by anyone. Wrong topic, green test, silent loss.
+         */
+        private final List<String> topicsSeen = new CopyOnWriteArrayList<>();
     }
 
     private static KafkaTopics topics() {
-        return new KafkaTopics(
-                "design.submissions", "design.updates", "submission.lifecycle",
-                "simulation.tasks", TELEMETRY_TOPIC, "simulation.lifecycle",
-                "aggregated.metrics", "aggregated.summary", "evaluation.results",
-                "evaluation.lifecycle", "design.submissions.dlt", "simulation.tasks.dlt",
-                "simulation.telemetry.dlt", "aggregated.metrics.dlt",
-                "evaluation.results.dlt", "submission.lifecycle.dlt");
+        // Every topic from the contract, so this test cannot drift from topics.conf by
+        // being left behind when a topic is added. See KafkaTopics#withContractNames:
+        // spelling out the names here meant a second copy of the catalogue, and a second
+        // copy is what drifts.
+        return KafkaTopics.withContractNames();
     }
 
     private TelemetryPublisher publisher;
@@ -400,6 +411,10 @@ class TelemetryPublisherTest {
             assertThat(sender.received).hasSize(200);
             assertThat(sender.received.stream().map(TelemetryEvent::nodeId).toList())
                     .isEqualTo(expected);
+            assertThat(sender.topicsSeen)
+                    .as("the samples went to the telemetry topic, which is the topic the "
+                            + "aggregator actually reads -- not merely somewhere")
+                    .containsOnly(TELEMETRY_TOPIC);
             assertThat(p.droppedSamples()).isZero();
             assertThat(p.publishedSamples()).isEqualTo(200);
         }

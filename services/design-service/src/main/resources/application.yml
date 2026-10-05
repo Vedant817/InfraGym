@@ -1,0 +1,98 @@
+spring:
+  application:
+    name: design-service
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    consumer:
+      group-id: ${ARCHFORGE_DESIGN_CONSUMER_GROUP:design-service-group}
+      # earliest: a restarted design service must not skip the summaries and evaluations of
+      # runs that finished while it was down. Those submissions would otherwise sit at
+      # AGGREGATING with no measurements and no verdict and no error anywhere.
+      auto-offset-reset: earliest
+      properties:
+        isolation.level: read_committed
+  datasource:
+    url: ${ARCHFORGE_POSTGRES_URL:jdbc:postgresql://localhost:15432/archforge}
+    username: ${ARCHFORGE_POSTGRES_USER:archforge}
+    password: ${ARCHFORGE_POSTGRES_PASSWORD:archforge}
+    hikari:
+      maximum-pool-size: ${ARCHFORGE_POSTGRES_POOL:10}
+      pool-name: design-service
+  jpa:
+    hibernate:
+      # validate, never update. The schema belongs to the Flyway migration, and a service
+      # that rewrites it on startup turns a migration that was wrong into drift nobody
+      # notices until the next environment differs.
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+  data:
+    mongodb:
+      # Credentials are part of the URI, not optional: the compose stack runs Mongo with
+      # MONGO_INITDB_ROOT_USERNAME set, so an anonymous connection is refused at createIndexes
+      # and the service fails to start with "Unauthorized" rather than falling back.
+      uri: ${ARCHFORGE_MONGO_URI:mongodb://archforge:archforge@localhost:17017/archforge?authSource=admin}
+      auto-index-creation: true
+    redis:
+      host: ${ARCHFORGE_VALKEY_HOST:localhost}
+      port: ${ARCHFORGE_VALKEY_PORT:16379}
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${SERVER_PORT:8085}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+  health:
+    # Kafka is how this service hears about runs at all, so a broker that is unreachable is a
+    # health failure rather than something to log and carry on. Reporting UP while consuming
+    # nothing is exactly the failure this service's whole existence is meant to prevent.
+    kafka:
+      enabled: true
+
+springdoc:
+  api-docs:
+    path: /api-docs
+
+archforge:
+  kafka:
+    topics:
+      design-submissions: ${TOPIC_DESIGN_SUBMISSIONS:design.submissions}
+      design-updates: ${TOPIC_DESIGN_UPDATES:design.updates}
+      submission-lifecycle: ${TOPIC_SUBMISSION_LIFECYCLE:submission.lifecycle}
+      aggregated-summary: ${TOPIC_AGGREGATED_SUMMARY:aggregated.summary}
+      evaluation-results: ${TOPIC_EVALUATION_RESULTS:evaluation.results}
+      evaluation-lifecycle: ${TOPIC_EVALUATION_LIFECYCLE:evaluation.lifecycle}
+  design:
+    consumer-group: ${ARCHFORGE_DESIGN_CONSUMER_GROUP:design-service-group}
+  security:
+    # No working defaults. If these are absent the service refuses to start rather than
+    # falling back to something guessable -- this service holds every user's designs and
+    # every measurement taken of them.
+    enabled: ${ARCHFORGE_SECURITY_ENABLED:true}
+    user: ${ARCHFORGE_SECURITY_USER:}
+    password: ${ARCHFORGE_SECURITY_PASSWORD:}
+    admin-user: ${ARCHFORGE_SECURITY_ADMIN_USER:}
+    admin-password: ${ARCHFORGE_SECURITY_ADMIN_PASSWORD:}
+    # The principal every request is given when security is disabled. Ownership checks still
+    # run against it -- see LocalDevelopmentPrincipalFilter.
+    local-user: ${ARCHFORGE_SECURITY_LOCAL_USER:local-dev}
+
+logging:
+  level:
+    com.archforge.design: INFO

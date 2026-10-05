@@ -78,16 +78,24 @@ public final class TopicNames {
     public static final String DESIGN_SUBMISSIONS_DLT = "design.submissions.dlt";
     public static final String SIMULATION_TASKS_DLT = "simulation.tasks.dlt";
     public static final String SIMULATION_TELEMETRY_DLT = "simulation.telemetry.dlt";
+    public static final String SIMULATION_LIFECYCLE_DLT = "simulation.lifecycle.dlt";
     public static final String AGGREGATED_METRICS_DLT = "aggregated.metrics.dlt";
+    public static final String AGGREGATED_SUMMARY_DLT = "aggregated.summary.dlt";
     public static final String EVALUATION_RESULTS_DLT = "evaluation.results.dlt";
+    public static final String EVALUATION_LIFECYCLE_DLT = "evaluation.lifecycle.dlt";
     public static final String SUBMISSION_LIFECYCLE_DLT = "submission.lifecycle.dlt";
+    public static final String DESIGN_UPDATES_DLT = "design.updates.dlt";
 
     public static final String DESIGN_SUBMISSIONS_DLT_ENV = "TOPIC_DESIGN_SUBMISSIONS_DLT";
     public static final String SIMULATION_TASKS_DLT_ENV = "TOPIC_SIMULATION_TASKS_DLT";
     public static final String SIMULATION_TELEMETRY_DLT_ENV = "TOPIC_SIMULATION_TELEMETRY_DLT";
+    public static final String SIMULATION_LIFECYCLE_DLT_ENV = "TOPIC_SIMULATION_LIFECYCLE_DLT";
     public static final String AGGREGATED_METRICS_DLT_ENV = "TOPIC_AGGREGATED_METRICS_DLT";
+    public static final String AGGREGATED_SUMMARY_DLT_ENV = "TOPIC_AGGREGATED_SUMMARY_DLT";
     public static final String EVALUATION_RESULTS_DLT_ENV = "TOPIC_EVALUATION_RESULTS_DLT";
+    public static final String EVALUATION_LIFECYCLE_DLT_ENV = "TOPIC_EVALUATION_LIFECYCLE_DLT";
     public static final String SUBMISSION_LIFECYCLE_DLT_ENV = "TOPIC_SUBMISSION_LIFECYCLE_DLT";
+    public static final String DESIGN_UPDATES_DLT_ENV = "TOPIC_DESIGN_UPDATES_DLT";
 
     /**
      * Every declared topic, so a deployment can be checked against the catalogue.
@@ -102,23 +110,26 @@ public final class TopicNames {
                 AGGREGATED_METRICS, AGGREGATED_SUMMARY,
                 EVALUATION_RESULTS, EVALUATION_LIFECYCLE,
                 DESIGN_SUBMISSIONS_DLT, SIMULATION_TASKS_DLT, SIMULATION_TELEMETRY_DLT,
-                AGGREGATED_METRICS_DLT, EVALUATION_RESULTS_DLT, SUBMISSION_LIFECYCLE_DLT);
+                SIMULATION_LIFECYCLE_DLT, AGGREGATED_METRICS_DLT, AGGREGATED_SUMMARY_DLT,
+                EVALUATION_RESULTS_DLT, EVALUATION_LIFECYCLE_DLT,
+                SUBMISSION_LIFECYCLE_DLT, DESIGN_UPDATES_DLT);
     }
 
     /**
      * Maps a source topic to its dead-letter topic.
      *
      * <p><b>Throws for a topic with no declared dead-letter queue</b>, rather than
-     * composing {@code sourceTopic + ".dlt"}. The old fallthrough produced names for
-     * four topics — {@code simulation.lifecycle.dlt},
-     * {@code aggregated.summary.dlt}, {@code evaluation.lifecycle.dlt},
-     * {@code design.updates.dlt} — that appear in no catalogue and no
-     * {@code topics.conf}. That was invisible only because those topics had no
-     * consumers; the first one added would have dead-lettered into a nonexistent topic,
-     * or auto-created it at the broker's default partition count, silently diverging
-     * from the catalogue that everything else is reconciled against.
+     * composing {@code sourceTopic + ".dlt"}.
      *
-     * <p>Which is worse: a composed name looks like it works.
+     * <p>That is not hypothetical caution. Four topics once had consumers and no declared
+     * DLQ: {@code simulation.lifecycle}, {@code aggregated.summary},
+     * {@code evaluation.lifecycle} and {@code design.updates}. The composed names were not
+     * in {@code topics.conf}, so with auto-creation disabled the dead-letter send failed
+     * with {@code UNKNOWN_TOPIC_OR_PARTITION}; the recoverer retried, the retry
+     * dead-lettered to the same missing topic, and the partition looped on
+     * "Record in retry and not yet recovered" indefinitely. All four now exist in the
+     * catalogue and are mapped below. The throw remains, because it is what turns the next
+     * consumer of a new topic into a startup failure rather than an infinite retry.
      *
      * <p><b>Throws rather than guessing.</b> This is the contract for code that decides
      * where to write — a producer must not silently invent a destination. Callers on a
@@ -138,9 +149,13 @@ public final class TopicNames {
             case DESIGN_SUBMISSIONS -> DESIGN_SUBMISSIONS_DLT;
             case SIMULATION_TASKS -> SIMULATION_TASKS_DLT;
             case SIMULATION_TELEMETRY -> SIMULATION_TELEMETRY_DLT;
+            case SIMULATION_LIFECYCLE -> SIMULATION_LIFECYCLE_DLT;
             case AGGREGATED_METRICS -> AGGREGATED_METRICS_DLT;
+            case AGGREGATED_SUMMARY -> AGGREGATED_SUMMARY_DLT;
             case EVALUATION_RESULTS -> EVALUATION_RESULTS_DLT;
+            case EVALUATION_LIFECYCLE -> EVALUATION_LIFECYCLE_DLT;
             case SUBMISSION_LIFECYCLE -> SUBMISSION_LIFECYCLE_DLT;
+            case DESIGN_UPDATES -> DESIGN_UPDATES_DLT;
             default -> throw new IllegalArgumentException(
                     "No dead-letter topic is declared for '" + sourceTopic
                             + "'. Either add one to TopicNames and topics.conf, or handle the "
@@ -163,7 +178,9 @@ public final class TopicNames {
         }
         return switch (sourceTopic) {
             case DESIGN_SUBMISSIONS, SIMULATION_TASKS, SIMULATION_TELEMETRY,
-                 AGGREGATED_METRICS, EVALUATION_RESULTS, SUBMISSION_LIFECYCLE -> true;
+                 SIMULATION_LIFECYCLE, AGGREGATED_METRICS, AGGREGATED_SUMMARY,
+                 EVALUATION_RESULTS, EVALUATION_LIFECYCLE, SUBMISSION_LIFECYCLE,
+                 DESIGN_UPDATES -> true;
             default -> false;
         };
     }

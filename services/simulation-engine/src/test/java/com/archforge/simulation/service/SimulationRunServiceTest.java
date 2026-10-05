@@ -109,13 +109,9 @@ class SimulationRunServiceTest {
         telemetrySender = new CollectingSender();
         registry = new SimulationOutcomeRegistry(properties);
 
-        var topics = new com.archforge.messaging.KafkaTopics(
-                "design.submissions", "design.updates", "submission.lifecycle",
-                "simulation.tasks", "simulation.telemetry", "simulation.lifecycle",
-                "aggregated.metrics", "aggregated.summary", "evaluation.results",
-                "evaluation.lifecycle", "design.submissions.dlt", "simulation.tasks.dlt",
-                "simulation.telemetry.dlt", "aggregated.metrics.dlt",
-                "evaluation.results.dlt", "submission.lifecycle.dlt");
+        // Every topic from the contract, so this test cannot drift from topics.conf.
+        // See KafkaTopics#withContractNames.
+        var topics = com.archforge.messaging.KafkaTopics.withContractNames();
 
         var telemetry = new com.archforge.simulation.event.TelemetryPublisher(
                 topics, properties, new SimpleMeterRegistry(), telemetrySender);
