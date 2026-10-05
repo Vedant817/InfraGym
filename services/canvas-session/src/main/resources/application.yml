@@ -3,12 +3,12 @@ spring:
     name: canvas-session
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+      host: ${ARCHFORGE_VALKEY_HOST:${REDIS_HOST:localhost}}
+      port: ${ARCHFORGE_VALKEY_PORT:${REDIS_PORT:16379}}
       timeout: 5000
 
 server:
-  port: ${SERVER_PORT:8085}
+  port: ${SERVER_PORT:8086}
 
 management:
   endpoints:
