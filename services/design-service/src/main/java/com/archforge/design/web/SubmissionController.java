@@ -10,7 +10,10 @@ import com.archforge.design.repository.NodeMetricRepository;
 import com.archforge.design.repository.SimulationRepository;
 import com.archforge.design.repository.SubmissionEventRepository;
 import com.archforge.design.repository.SubmissionRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -42,22 +45,44 @@ import java.util.UUID;
 @Slf4j
 public class SubmissionController {
 
+    /**
+     * Error code distinguishing "this run has not reached the stage that produces
+     * measurements" from "this id does not exist".
+     *
+     * <p>The two used to share a bare 404. A submission the caller just created, on a
+     * run still compiling, therefore answered "not found", which is both alarming
+     * and wrong: the submission exists and the caller owns it. Ownership stays a 404
+     * — answering 403 would confirm an id exists, which is exactly what an
+     * enumeration of somebody else's ids wants — so the distinction is carried by an
+     * explicit code the client can branch on.
+     */
+    static final String MEASUREMENTS_NOT_READY = "MEASUREMENTS_NOT_READY";
+
+    /** Same distinction for the evaluation endpoint. */
+    static final String EVALUATION_NOT_READY = "EVALUATION_NOT_READY";
+
+    /** Code for a run the compiler refused, which will never produce an evaluation. */
+    static final String EVALUATION_REJECTED = "EVALUATION_REJECTED";
+
     private final SubmissionRepository submissions;
     private final SubmissionEventRepository events;
     private final SimulationRepository simulations;
     private final NodeMetricRepository metrics;
     private final EvaluationRepository evaluations;
+    private final ObjectMapper objectMapper;
 
     public SubmissionController(SubmissionRepository submissions,
                                 SubmissionEventRepository events,
                                 SimulationRepository simulations,
                                 NodeMetricRepository metrics,
-                                EvaluationRepository evaluations) {
+                                EvaluationRepository evaluations,
+                                ObjectMapper objectMapper) {
         this.submissions = submissions;
         this.events = events;
         this.simulations = simulations;
         this.metrics = metrics;
         this.evaluations = evaluations;
+        this.objectMapper = objectMapper;
     }
 
     @GetMapping
@@ -92,12 +117,13 @@ public class SubmissionController {
         List<Dtos.StageEvent> stages = events
                 .findBySubmissionIdOrderByOccurredAtAsc(id).stream()
                 .map(event -> new Dtos.StageEvent(event.getStage(), event.getStatus(),
-                        event.getMessage(), event.getOccurredAt(), event.getReceivedAt()))
+                        event.getMessage(), event.getOccurredAt(), event.getReceivedAt(),
+                        readDetails(event.getDetails())))
                 .toList();
         return ResponseEntity.ok(new Dtos.SubmissionDetail(
                 toSummary(submission, lastEvent(id)),
                 stages,
-                simulationOf(submission).map(SubmissionController::toSimulationSummary).orElse(null),
+                simulationOf(submission).map(this::toSimulationSummary).orElse(null),
                 latestEvaluation(submission).map(SubmissionController::toEvaluationView).orElse(null)));
     }
 
@@ -125,16 +151,19 @@ public class SubmissionController {
      * to go looking for it.
      */
     @GetMapping("/{id}/measurements")
-    public ResponseEntity<Dtos.MeasurementView> measurements(Authentication authentication,
-                                                             @PathVariable UUID id) {
+    public ResponseEntity<?> measurements(Authentication authentication,
+                                          @PathVariable UUID id) {
         SubmissionEntity submission = submissions.findByIdAndUserId(id, authentication.getName())
                 .orElse(null);
         if (submission == null) {
+            // Not this account's, or not a real id. A 403 would confirm the id exists,
+            // which is what an enumeration of somebody else's ids wants.
             return ResponseEntity.notFound().build();
         }
         var simulation = simulationOf(submission);
         if (simulation.isEmpty() || submission.getSimulationId() == null) {
-            return ResponseEntity.notFound().build();
+            return notReady(submission, MEASUREMENTS_NOT_READY,
+                    "This run has not produced measurements yet. They appear once the simulation reaches aggregation.");
         }
         List<NodeMetric> nodes = metrics.findBySimulation(submission.getSimulationId());
         String worstNodeId = nodes.isEmpty() ? null : nodes.get(0).nodeId();
@@ -145,17 +174,51 @@ public class SubmissionController {
                 worstNodeId, worstP99));
     }
 
+    /**
+     * The verdict, or the reason there is not one yet.
+     *
+     * <p>Three outcomes that used to collapse into one 404. A run the compiler
+     * rejected will never have an evaluation, and saying "not found" for it hides the
+     * real answer — fix the topology — behind what reads like a missing resource. A
+     * run still in progress is a different answer again, and one that finished
+     * without a verdict genuinely has nothing to return.
+     */
     @GetMapping("/{id}/evaluation")
-    public ResponseEntity<Dtos.EvaluationView> evaluation(Authentication authentication,
-                                                          @PathVariable UUID id) {
+    public ResponseEntity<?> evaluation(Authentication authentication,
+                                        @PathVariable UUID id) {
         SubmissionEntity submission = submissions.findByIdAndUserId(id, authentication.getName())
                 .orElse(null);
         if (submission == null) {
             return ResponseEntity.notFound().build();
         }
-        return latestEvaluation(submission)
-                .map(evaluation -> ResponseEntity.ok(toEvaluationView(evaluation)))
-                .orElseGet(() -> ResponseEntity.notFound().build());
+        var stored = latestEvaluation(submission);
+        if (stored.isPresent()) {
+            return ResponseEntity.ok(toEvaluationView(stored.get()));
+        }
+        if (submission.getStatus() == com.archforge.contracts.lifecycle.SubmissionStatus.REJECTED) {
+            return notReady(submission, EVALUATION_REJECTED,
+                    "This run was rejected by the compiler, so no evaluation was produced. "
+                            + "Fix the reported topology problems and start a new run.");
+        }
+        if (submission.getStatus() == null || !submission.getStatus().isTerminal()) {
+            return notReady(submission, EVALUATION_NOT_READY,
+                    "This run has not been evaluated yet. The verdict appears once evaluation completes.");
+        }
+        return ResponseEntity.notFound().build();
+    }
+
+    /**
+     * A 404 carrying a machine-readable code, so the client can tell "not yet" from
+     * "never" from "not yours" without parsing the prose.
+     */
+    private static ResponseEntity<ProblemDetail> notReady(SubmissionEntity submission, String code,
+                                                          String detail) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, detail);
+        problem.setTitle("Results are not available for this run yet");
+        problem.setProperty("code", code);
+        problem.setProperty("submissionId", submission.getId());
+        problem.setProperty("status", submission.getStatus() == null ? null : submission.getStatus().getValue());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(problem);
     }
 
     private java.util.Optional<SimulationEntity> simulationOf(SubmissionEntity submission) {
@@ -184,14 +247,14 @@ public class SubmissionController {
                 lastEvent == null ? null : lastEvent.getMessage());
     }
 
-    static Dtos.SimulationSummary toSimulationSummary(SimulationEntity simulation) {
+    Dtos.SimulationSummary toSimulationSummary(SimulationEntity simulation) {
         return new Dtos.SimulationSummary(
                 simulation.getId(), simulation.getScenario(), simulation.getStatus(),
                 simulation.getTickCount(), simulation.getTotalTicks(), simulation.getTickMillis(),
                 simulation.truncated(),
                 simulation.getOffered(), simulation.getServed(), simulation.getFailed(),
                 simulation.getQueued(), simulation.completionRate(), simulation.reconciles(),
-                readWarnings(simulation.getWarnings()),
+                readWarnings(simulation.getWarnings(), objectMapper),
                 simulation.getStartedAt(), simulation.getCompletedAt());
     }
 
@@ -231,10 +294,48 @@ public class SubmissionController {
                 evaluation.evaluatedAt());
     }
 
-    private static List<String> readWarnings(String json) {
+    /**
+ * The stored warnings as a list of strings.
+     *
+     * <p>The column holds a JSON array produced by the aggregator, so it has to be
+     * <em>parsed</em>. Wrapping the raw text in {@code List.of(json)} instead turned
+     * {@code ["a","b"]} into the single element {@code ["[\"a\",\"b\"]"]}, which the UI
+     * then rendered as literal backslash-quote-bracket text — the caveat existed, was
+     * stored correctly, and reached the user unreadable. Unparseable content is
+     * reported as one warning naming itself rather than dropped, because a caveat that
+     * vanishes silently is the failure this whole field exists to prevent.
+     */
+    private static List<String> readWarnings(String json, ObjectMapper objectMapper) {
         if (json == null || json.isBlank() || "[]".equals(json) || "null".equals(json)) {
             return List.of();
         }
-        return List.of(json);
+        try {
+            return objectMapper.readValue(json,
+                    objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
+        } catch (Exception e) {
+            log.warn("Stored simulation warnings are not a JSON array of strings: {}", json, e);
+            return List.of("Stored warnings could not be decoded and are shown verbatim: " + json);
+        }
+    }
+
+    /**
+     * A stage event's stored details, as a map.
+     *
+     * <p>Parsed rather than passed through as text, so the client can render per-node
+     * findings instead of displaying a JSON string. Unreadable or non-object content
+     * yields an empty map: the event itself is still worth recording, and losing the
+     * optional detail is not a reason to fail the request.
+     */
+    private Map<String, Object> readDetails(String json) {
+        if (json == null || json.isBlank()) {
+            return Map.of();
+        }
+        try {
+            return objectMapper.readValue(json,
+                    objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class));
+        } catch (Exception e) {
+            log.warn("Stored lifecycle details are not a JSON object: {}", json, e);
+            return Map.of();
+        }
     }
 }

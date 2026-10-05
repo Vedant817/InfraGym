@@ -1,6 +1,7 @@
 package com.archforge.design.web;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -57,13 +58,22 @@ public final class Dtos {
             String currentMessage) {
     }
 
-    /** One stage a submission passed through. */
+    /**
+     * One stage a submission passed through.
+     *
+     * <p>{@code details} is the lifecycle event's structured payload, an empty map when
+     * the producer sent none. It exists so a rejection can say <em>which</em> node was
+     * refused and why: the compiler publishes {@code findings:[{field, code, message}]}
+     * on a rejection, and without this the record carried only the prose
+     * "Topology failed validation".
+     */
     public record StageEvent(
             String stage,
             String status,
             String message,
             java.time.Instant occurredAt,
-            java.time.Instant receivedAt) {
+            java.time.Instant receivedAt,
+            Map<String, Object> details) {
     }
 
     /** A submission with its history, for the progress view. */
