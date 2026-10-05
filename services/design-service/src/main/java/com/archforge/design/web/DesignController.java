@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -87,10 +89,11 @@ public class DesignController {
                 request.scenario(),
                 request.topology().getNodes().size(), request.topology().getEdges().size());
         designs.save(design);
-        canvases.recordRevision(design.getId().toString(), userId,
+        canvases.create(design.getId().toString(), userId,
                 TopologySnapshot.from(request.topology(), objectMapper));
 
         return ResponseEntity.status(HttpStatus.CREATED)
+                .eTag("\"1\"")
                 .body(new Dtos.DesignDetail(design.getId(), design.getName(),
                         design.getDescription(), design.getScenario(), 1L, request.topology(),
                         design.getCreatedAt(), design.getUpdatedAt()));
@@ -108,35 +111,71 @@ public class DesignController {
         if (document == null) {
             return ResponseEntity.notFound().build();
         }
-        return ResponseEntity.ok(new Dtos.DesignDetail(design.getId(), design.getName(),
+        return ResponseEntity.ok().eTag("\"" + document.getRevision() + "\"")
+                .body(new Dtos.DesignDetail(design.getId(), design.getName(),
                 design.getDescription(), design.getScenario(), document.getRevision(),
                 document.getTopology(), design.getCreatedAt(), design.getUpdatedAt()));
     }
 
     @PutMapping("/{id}/topology")
-    public ResponseEntity<Dtos.DesignDetail> saveTopology(
+    public ResponseEntity<?> saveTopology(
             Authentication authentication,
             @PathVariable UUID id,
+            @RequestHeader(value = "If-Match", required = false) String ifMatch,
             @RequestBody Dtos.UpdateTopologyRequest request) {
         String userId = authentication.getName();
         DesignEntity design = designs.findByIdAndUserId(id, userId).orElse(null);
         if (design == null) {
             return ResponseEntity.notFound().build();
         }
+        long expectedRevision = parseRevision(ifMatch);
         if (request.topology() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "A topology save needs a topology: topology was null or absent");
         }
-        var document = canvases.recordRevision(id.toString(), userId,
-                TopologySnapshot.from(request.topology(), objectMapper));
+        var document = canvases.compareAndSetRevision(id.toString(), userId, expectedRevision,
+                TopologySnapshot.from(request.topology(), objectMapper)).orElse(null);
+        if (document == null) {
+            var current = canvases.findByDesignIdAndUserId(id.toString(), userId).orElse(null);
+            if (current == null) {
+                return ResponseEntity.notFound().build();
+            }
+            ProblemDetail conflict = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,
+                    "Topology was not saved: expected revision " + expectedRevision
+                            + ", but stored revision is " + current.getRevision()
+                            + ". Reload the design before saving again. Local edits can be exported.");
+            conflict.setTitle("Topology revision conflict");
+            conflict.setProperty("expectedRevision", expectedRevision);
+            conflict.setProperty("storedRevision", current.getRevision());
+            conflict.setProperty("reloadRequired", true);
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .eTag("\"" + current.getRevision() + "\"").body(conflict);
+        }
         design.topologyChanged(request.topology().getNodes().size(),
                 request.topology().getEdges().size());
         designs.save(design);
 
-        return ResponseEntity.ok(new Dtos.DesignDetail(design.getId(), design.getName(),
+        return ResponseEntity.ok().eTag("\"" + document.getRevision() + "\"")
+                .body(new Dtos.DesignDetail(design.getId(), design.getName(),
                 design.getDescription(), design.getScenario(),
-                document == null ? 0 : document.getRevision(), request.topology(),
+                document.getRevision(), document.getTopology(),
                 design.getCreatedAt(), design.getUpdatedAt()));
+    }
+
+    private static long parseRevision(String ifMatch) {
+        if (ifMatch == null) {
+            throw new ResponseStatusException(HttpStatus.PRECONDITION_REQUIRED,
+                    "If-Match is required: send the quoted revision from the loaded design");
+        }
+        if (!ifMatch.matches("\"[0-9]+\"")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "If-Match must be a single strong, quoted numeric revision, for example \"1\"");
+        }
+        try {
+            return Long.parseLong(ifMatch.substring(1, ifMatch.length() - 1));
+        } catch (NumberFormatException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "If-Match revision is too large");
+        }
     }
 
     /**

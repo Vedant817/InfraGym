@@ -1,6 +1,7 @@
 package com.archforge.design.canvas;
 
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.FindAndModifyOptions;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
@@ -47,24 +48,36 @@ public class CanvasRepository {
         return mongo.find(Query.query(Criteria.where("userId").is(userId)), CanvasDocument.class);
     }
 
-    /**
-     * Records a new revision.
-     *
-     * <p>Uses {@code $inc} for the revision rather than read-modify-write, because two edits
-     * landing close together would otherwise both read the same revision and one would be
-     * lost -- and the revision is what a reader uses to decide whether its cached copy is
-     * stale, so a repeated revision makes staleness undetectable.
-     */
-    public CanvasDocument recordRevision(String designId, String userId, TopologySnapshot topology) {
+    /** Inserts the initial revision; creation never overwrites an existing document. */
+    public CanvasDocument create(String designId, String userId, TopologySnapshot topology) {
         Instant now = Instant.now();
+        CanvasDocument document = new CanvasDocument();
+        document.setId(designId);
+        document.setDesignId(designId);
+        document.setUserId(userId);
+        document.setTopology(topology);
+        document.setRevision(1);
+        document.setCreatedAt(now);
+        document.setUpdatedAt(now);
+        return mongo.insert(document);
+    }
+
+    /**
+     * MongoDB compares and increments in one document operation. No upsert: a stale
+     * revision or missing/foreign document must never create or overwrite a topology.
+     * The returned document is this write's post-image, not a later editor's revision.
+     */
+    public Optional<CanvasDocument> compareAndSetRevision(String designId, String userId,
+                                                         long expectedRevision,
+                                                         TopologySnapshot topology) {
         Update update = new Update()
-                .set("userId", userId)
                 .set("topology", topology)
-                .set("updatedAt", now)
+                .set("updatedAt", Instant.now())
                 .inc("revision", 1);
-        Query query = Query.query(Criteria.where("designId").is(designId));
-        mongo.upsert(query, update, CanvasDocument.class);
-        return mongo.findOne(query, CanvasDocument.class);
+        Query query = Query.query(Criteria.where("designId").is(designId)
+                .and("userId").is(userId).and("revision").is(expectedRevision));
+        return Optional.ofNullable(mongo.findAndModify(query, update,
+                FindAndModifyOptions.options().returnNew(true), CanvasDocument.class));
     }
 
     public long countByUserId(String userId) {
