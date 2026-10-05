@@ -398,14 +398,18 @@ public class DiscreteEventSimulator {
         double served;
         double failedThisTick;
         double backlog;
+        double demand = state.getQueueDepth() + arrivalCount;
 
         if (state.isFailing()) {
             state.setFailureTicks(state.getFailureTicks() + 1);
             served = 0;
             backlog = applyFailure(state, traits, arrivalCount, upstreamPathMs);
-            failedThisTick = traits.buffers() ? 0 : arrivalCount;
+            // A failed cache forwards its demand, including previously queued lookups.
+            // Without a downstream destination that demand is lost instead.
+            failedThisTick = traits.passesThroughOnFailure()
+                    ? (isTerminal(node) ? demand : 0)
+                    : (traits.buffers() ? 0 : demand);
         } else {
-            double demand = state.getQueueDepth() + arrivalCount;
             served = Math.min(demand, serviceable);
             failedThisTick = 0;
             backlog = demand - served;
@@ -441,11 +445,13 @@ public class DiscreteEventSimulator {
         double missFraction = traits.type() == com.archforge.contracts.canvas.NodeType.CACHE
                 ? sampledMissFraction(traits)
                 : 0.0;
-        double cacheHits = recordCacheOutcome(node, state, traits, arrivalCount, missFraction);
+        // Only processed lookups can hit; arrivals still queued or shed cannot complete.
+        double cacheHits = recordCacheOutcome(node, state, traits,
+                state.isFailing() ? demand : served, missFraction);
 
         // Divided across downstream branches, so a fan-out conserves the request count
         // instead of replicating it. See downstreamShare for why.
-        double bypassRps = recordBypass(node, state, traits, served, missFraction)
+        double bypassRps = recordBypass(node, state, traits, served, missFraction, demand)
                 * downstreamShare(node);
         double latencyMs = pathLatency(state, traits, upstreamPathMs, served);
 
@@ -560,16 +566,18 @@ public class DiscreteEventSimulator {
                                 ComponentState state,
                                 NodeCharacteristics traits,
                                 double served,
-                                double missFraction) {
+                                double missFraction,
+                                double demand) {
         if (state.isFailing()) {
             if (!traits.passesThroughOnFailure()) {
                 return 0;
             }
-            // A failed cache forwards everything it was offered, which is the entire
-            // point: the outage's cost is that all of this load now lands on the store
-            // behind it. With several stores behind the cache the volume is divided
-            // between them -- see downstreamShare.
-            return state.getLastOfferedRps();
+            // Include queued lookups in the bypass before applyFailure clears them.
+            // With several stores the volume is divided by downstreamShare.
+            if (isTerminal(node)) {
+                state.setUnroutedBypassRequests(state.getUnroutedBypassRequests() + demand);
+            }
+            return demand / tickSeconds;
         }
         if (traits.type() == com.archforge.contracts.canvas.NodeType.CACHE) {
             double misses = served * missFraction;
@@ -635,9 +643,8 @@ public class DiscreteEventSimulator {
      * gateway in front of a load balancer has three entry-point-typed nodes, and
      * counting the external load at each one reported it three times over.
      *
-     * <p>As a *routing* question the type is still the right one — an entry point takes
-     * external traffic even with no upstream, which is what {@code arrivalsFor} relies
-     * on. Only the accounting needs the structural definition.
+     * <p>Routing uses the same root test: an entry-point-typed component with upstream
+     * edges receives only what those upstream components forwarded.
      */
     private boolean isTrafficRoot(CompiledNode node) {
         return incoming.getOrDefault(node.getId(), List.of()).isEmpty();
@@ -936,14 +943,13 @@ public class DiscreteEventSimulator {
     /**
      * Arrivals for one component this tick, in requests per second.
      *
-     * <p>Entry points take the external offered load; everything else takes what its
-     * upstream forwarded. The previous engine gave every node the same request rate
-     * regardless of the graph, so a leaf database and the load balancer in front of it
-     * were recorded as handling identical traffic — which made the DAG's shape
-     * irrelevant to the result.
+     * <p>Only entry points with no upstream take external load. A load balancer or
+     * gateway further along the path takes forwarded traffic like any other node.
+     * Injecting external load there resurrected upstream rejections: those requests
+     * were counted as failed upstream and served downstream in the same run.
      */
     private double arrivalsFor(CompiledNode node, double offeredRps) {
-        if (node.getType().canBeEntryPoint()) {
+        if (isTrafficRoot(node) && node.getType().canBeEntryPoint()) {
             return offeredRps;
         }
         double forwarded = 0;

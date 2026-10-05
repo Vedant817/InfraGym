@@ -1244,11 +1244,8 @@ class DiscreteEventSimulatorTest {
         @Test
         @DisplayName("a mid-graph entry-point-typed node does not invent load either")
         void midGraphEntryPointIsNotASource() {
-            // The accounting uses the structural definition; routing still uses the type, so
-            // a gateway that happens to sit mid-graph takes the external offered rate rather
-            // than what reached it. The totals must still balance, which is what this
-            // checks -- and it is the reason the two definitions are documented as
-            // deliberately different.
+            // A gateway mid-graph receives only what its upstream forwarded. The focused
+            // bottleneck regression in RequestAccountingTest also exercises rejected load.
             DiscreteEventSimulator simulator = simulator(threeTierFrontEnd(), flat(200, 20), 200);
             simulator.run(20, new Recorder());
 
@@ -1258,5 +1255,4 @@ class DiscreteEventSimulatorTest {
         }
     }
 }
-
 
