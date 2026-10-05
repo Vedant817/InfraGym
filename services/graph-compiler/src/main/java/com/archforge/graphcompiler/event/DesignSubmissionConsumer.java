@@ -13,6 +13,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -82,8 +83,12 @@ public class DesignSubmissionConsumer {
             throw new IllegalArgumentException("Design submission is missing submissionId");
         }
         if (event.topology() == null || event.topology().nodeCount() == 0) {
-            reject(event, "Design contains no nodes.",
-                    List.of("Design contains no nodes. Add at least one component before submitting."));
+            String reason = "Design contains no nodes. Add at least one component before submitting.";
+            // Carries a finding too, so this early exit reports the same structured
+            // detail as a validation rejection. A client that renders per-node findings
+            // would otherwise show an empty list for a run it must explain.
+            reject(event, "Design contains no nodes.", List.of(reason),
+                    List.of(new ValidationException.ValidationFinding("nodes", "EMPTY_TOPOLOGY", reason)));
             return;
         }
         if (inFlight.putIfAbsent(event.submissionId(), Boolean.TRUE) != null) {
@@ -114,7 +119,9 @@ public class DesignSubmissionConsumer {
             log.info("Processed submission {} -> simulation {}", event.submissionId(), task.simulationId());
 
         } catch (ValidationException e) {
-            reject(event, "Topology failed validation", e.getErrors());
+            // The structured findings, not getErrors(): the field path and the code are
+            // what let a client point at the offending node.
+            reject(event, "Topology failed validation", e.getErrors(), e.blockingFindings());
         } finally {
             inFlight.remove(event.submissionId());
         }
@@ -136,11 +143,51 @@ public class DesignSubmissionConsumer {
         }
     }
 
+    /**
+     * Marks a submission rejected and publishes why, per node.
+     *
+     * <p>This used to flatten the findings to bare strings, so the lifecycle event said
+     * only "Topology failed validation" and the user was told a run had failed without
+     * being told <em>what</em> to fix. {@link ValidationException#blockingFindings()}
+     * already carries the field path and the code the validators assigned
+     * ({@code INVALID_NODE_TYPE}, {@code SELF_LOOP}, {@code CYCLE_DETECTED}…), and
+     * that detail was being dropped on the floor here. Both shapes are now published:
+     * {@code findings} for a client that can render per-node detail, and {@code errors}
+     * as the plain messages for anything reading only the strings.
+     *
+     * <p>The message names the first cause too, so a reader of the submission record
+     * who never opens the finding list still learns something actionable.
+     */
     private void reject(DesignSubmittedEvent event, String message, List<String> errors) {
+        reject(event, message, errors, List.of());
+    }
+
+    private void reject(DesignSubmittedEvent event, String message, List<String> errors,
+                        List<ValidationException.ValidationFinding> findings) {
         log.warn("Submission {} rejected: {} ({})", event.submissionId(), message, errors);
+        String headline = findings.isEmpty()
+                ? message
+                : message + ": " + findings.getFirst().message()
+                + (findings.size() > 1 ? " (and " + (findings.size() - 1) + " more)" : "");
+        List<Map<String, Object>> rendered = findings.stream()
+                .map(finding -> {
+                    Map<String, Object> one = new LinkedHashMap<>();
+                    if (finding.field() != null) {
+                        one.put("field", finding.field());
+                    }
+                    if (finding.code() != null) {
+                        one.put("code", finding.code());
+                    }
+                    one.put("message", finding.message());
+                    return one;
+                })
+                .toList();
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("errors", errors == null ? List.of() : errors);
+        details.put("findings", rendered);
         lifecyclePublisher.publish(SubmissionLifecycleEvent.withDetails(
                 event.correlationId(), event.submissionId(), null, event.userId(), event.designId(),
-                SubmissionLifecycleEvent.STAGE_COMPILER, SubmissionStatus.REJECTED, message,
-                Map.of("errors", errors == null ? List.of() : errors)));
+                SubmissionLifecycleEvent.STAGE_COMPILER, SubmissionStatus.REJECTED, headline,
+                details));
     }
 }
