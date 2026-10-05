@@ -3,31 +3,17 @@ spring:
     name: api-gateway
   cloud:
     gateway:
-      routes:
-        - id: graph-compiler
-          uri: ${GRAPH_COMPILER_URL:http://localhost:8081}
-          predicates:
-            - Path=/api/v1/compile/**
-        - id: canvas-session
-          uri: ${CANVAS_SESSION_URL:http://localhost:8085}
-          predicates:
-            - Path=/api/v1/session/**
-        - id: ai-evaluator
-          uri: ${AI_EVALUATOR_URL:http://localhost:8084}
-          predicates:
-            - Path=/api/v1/evaluate/**
+      # Routes and their protections are defined only in GatewayConfig.
       default-filters:
         - DedupeResponseHeader=Access-Control-Allow-Origin
-      globalcors:
-        cors-configurations:
-          '[/**]':
-            allowedOrigins: "*"
-            allowedMethods: "*"
-            allowedHeaders: "*"
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    consumer:
+      group-id: ${KAFKA_GROUP_ID:api-gateway-group}
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+      host: ${ARCHFORGE_VALKEY_HOST:${REDIS_HOST:localhost}}
+      port: ${ARCHFORGE_VALKEY_PORT:${REDIS_PORT:16379}}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -38,14 +24,62 @@ management:
       exposure:
         include: health,info,metrics,gateway
   endpoint:
+    gateway:
+      access: read-only
     health:
       show-details: when-authorized
+      roles: ADMIN
 
 gateway:
+  targets:
+    graph-compiler: ${GRAPH_COMPILER_URL:http://localhost:8081}
+    canvas-session: ${CANVAS_SESSION_URL:http://localhost:8086}
+    canvas-websocket: ${CANVAS_WEBSOCKET_URL:ws://localhost:8086}
+    ai-evaluator: ${AI_EVALUATOR_URL:http://localhost:8084}
+    design-service: ${DESIGN_SERVICE_URL:http://localhost:8085}
   rate-limit:
-    requests-per-minute: 60
-    burst-capacity: 10
+    requests-per-minute: ${GATEWAY_REQUESTS_PER_MINUTE:60}
+    # Requests, not tokens.
+    burst-capacity: ${GATEWAY_BURST_CAPACITY:10}
+  cors:
+    allowed-origins: ${GATEWAY_ALLOWED_ORIGINS:http://localhost:3000}
+
+archforge:
+  security:
+    # Same Basic credentials as downstream; never a working default.
+    # Empty configuration starts with no users and denies protected requests.
+    compile-user: ${COMPILE_USER:}
+    compile-password: ${COMPILE_PASSWORD:}
+    user: ${ARCHFORGE_SECURITY_USER:}
+    password: ${ARCHFORGE_SECURITY_PASSWORD:}
+    # The gateway's own administrator. The property is deliberately NOT named
+    # `admin-user`: Spring's relaxed binding maps the environment variable
+    # ARCHFORGE_SECURITY_ADMIN_USER onto `archforge.security.admin-user`, and an
+    # environment variable outranks the `${ADMIN_USER:}` placeholder below. Naming this
+    # slot `admin-user` therefore meant that exporting both ADMIN_USER and
+    # ARCHFORGE_SECURITY_ADMIN_USER silently overwrote this credential - archforge-admin
+    # then returned 401 with nothing logged anywhere. `operator-admin-user` only
+    # relaxed-binds from ARCHFORGE_SECURITY_OPERATOR_ADMIN_USER, so the two admin slots
+    # cannot be configured by one variable again.
+    operator-admin-user: ${ADMIN_USER:}
+    operator-admin-password: ${ADMIN_PASSWORD:}
+    # The design-service administrator. Deliberately NOT ARCHFORGE_SECURITY_ADMIN_USER:
+    # that variable relaxed-binds onto archforge.security.admin-user, which this service
+    # must never declare. Exporting it here now fails startup with instructions rather
+    # than overwriting the operator credential, so use the dedicated name below and set
+    # the same credential on the design service as its ARCHFORGE_SECURITY_ADMIN_USER.
+    design-admin-user: ${ARCHFORGE_SECURITY_DESIGN_ADMIN_USER:}
+    design-admin-password: ${ARCHFORGE_SECURITY_DESIGN_ADMIN_PASSWORD:}
 
 logging:
   level:
     com.archforge.gateway: INFO
+
+# Spring Cloud CircuitBreaker's implicit one-second deadline can return a 503
+# while a cold Mongo/Postgres write still commits. Allow the downstream publish
+# budget (15 seconds) to finish before the gateway times out.
+resilience4j:
+  timelimiter:
+    configs:
+      default:
+        timeout-duration: ${GATEWAY_REQUEST_TIMEOUT:30s}
