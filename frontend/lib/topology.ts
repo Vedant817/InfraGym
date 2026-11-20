@@ -2,29 +2,21 @@
 // test runner; only value imports (lib/naming.ts -> here) must name ".ts".
 import type { CanvasEdge, CanvasNode, JsonObject, Topology, ValidationFinding } from "./contracts";
 
-export const componentTypes = [
-  "client", "cdn", "load_balancer", "gateway", "auth", "service", "worker", "function",
-  "queue", "cache", "database", "storage", "blob", "search", "api", "topic", "stream",
-  "metrics", "log", "tracing", "scheduler", "rate_limiter", "circuit_breaker",
-  "container", "kubernetes", "external", "edge",
-] as const;
-
 /**
  * The node types the graph compiler accepts, mirrored from the wire contract's
- * `NodeType` enum.
+ * `NodeType` enum. This is also the palette.
  *
- * The palette above is wider than this, and that is a real divergence rather than
- * an oversight kept for symmetry: the compiler rejects an unrecognised type with a
- * blocking `INVALID_NODE_TYPE` finding, so a `metrics` or `tracing` node drawn from
- * the palette is refused at submit time. {@link preflight} names the offending node
- * before that happens instead of letting the run be rejected after submission.
- * Mirrored here because the frontend cannot import the server enum; the list is
- * asserted against it in the backend's contract tests.
+ * A wider palette used to offer `metrics`, `tracing`, and other names the compiler
+ * rejects with `INVALID_NODE_TYPE`, so a node drawn from the palette could never
+ * run. Saved topologies can still contain those types; {@link preflight} names the
+ * offending node rather than pretending the palette still offers them. Mirrored
+ * here because the frontend cannot import the server enum.
  */
 export const compilableComponentTypes = [
   "client", "cdn", "load_balancer", "gateway", "auth", "service", "worker", "function",
   "queue", "cache", "database", "storage", "monitoring", "external",
 ] as const;
+export const componentTypes = compilableComponentTypes;
 const compilable = new Set<string>(compilableComponentTypes);
 
 export function componentLabel(type: string): string { return type.replaceAll("_", " "); }

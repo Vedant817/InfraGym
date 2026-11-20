@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { rejectionNotice, terminal } from "../lib/format.ts";
 import {
-  compilableComponentTypes, componentLabel, dataWithoutLabel, isCompilableType,
+  compilableComponentTypes, componentLabel, componentTypes, dataWithoutLabel, isCompilableType,
   labelById, newNode, nodeLabel, parseParameters, preflight, serializeTopology, withLabel,
 } from "../lib/topology.ts";
 import { nameMeasurements, rejectionFindings, withComponentNames } from "../lib/naming.ts";
@@ -167,9 +167,17 @@ test("per-node rejection detail is read from the lifecycle event", () => {
   assert.deepEqual(rejectionFindings(undefined), []);
 });
 
+test("the palette offers only types the compiler accepts", () => {
+  assert.deepEqual([...componentTypes], [...compilableComponentTypes]);
+  assert.equal(componentTypes.includes("monitoring"), true);
+  assert.equal(componentTypes.includes("metrics"), false);
+  assert.equal(componentTypes.includes("tracing"), false);
+});
+
 test("the two isolated-node topologies the QA run was rejected for are caught before submitting", () => {
-  // Both shapes the compiler refuses, reproduced exactly: valid chain plus isolated
-  // observability nodes the palette offers but the compiler's NodeType does not accept.
+  // Both shapes the compiler refuses, reproduced exactly: a valid chain plus isolated
+  // observability nodes a saved topology can still contain. The palette no longer
+  // offers them. Pre-flight still has to name the node, because old designs do.
   for (const type of ["metrics", "tracing"]) {
     const topology = {
       nodes: [

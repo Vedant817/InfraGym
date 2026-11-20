@@ -33,8 +33,8 @@ blocking rules are blocking here: the compiler's own non-blocking advice (orphan
 components, no entry point) is shown as advisory, because blocking it would prevent runs
 the pipeline would accept.
 
-The palette offers more component types than the compiler's `NodeType` accepts, so an
-observability node drawn from the palette is refused at submit time. The pre-flight
+The palette offers only the compiler's `NodeType` values, including `monitoring`.
+A saved topology can still contain a type the compiler rejects. The pre-flight
 names the offending node, its type, and the accepted types. On rejection the run page
 renders the compiler's per-node findings, which the compiler publishes as
 `findings: [{field, code, message}]` on the lifecycle event and the design service
