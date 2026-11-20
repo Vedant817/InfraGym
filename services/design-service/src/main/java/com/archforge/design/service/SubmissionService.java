@@ -80,12 +80,15 @@ public class SubmissionService {
                                 + "reference something that was drawn."));
 
         Topology topology = objectMapper.convertValue(document.getTopology(), Topology.class);
-        ScenarioType resolvedScenario = ScenarioType.findByValue(scenario);
+        // fromValue throws on an unknown name. Callers that used to pass junk through
+        // findByValue stored it as steady state and then simulated a different experiment
+        // from the one the user asked for.
+        ScenarioType resolvedScenario = ScenarioType.fromValue(scenario);
 
         UUID submissionId = UUID.randomUUID();
         SubmissionEntity submission = SubmissionEntity.create(
                 submissionId, designId, userId,
-                resolvedScenario == null ? "normal" : resolvedScenario.getValue(),
+                resolvedScenario.getValue(),
                 scenarioNotes,
                 toJson(topology), topology, Instant.now(), submissionId);
 
@@ -107,7 +110,7 @@ public class SubmissionService {
                 designId.toString(),
                 userId,
                 sessionId,
-                resolvedScenario == null ? ScenarioType.NORMAL.getValue() : resolvedScenario.getValue(),
+                resolvedScenario.getValue(),
                 scenarioNotes,
                 topology,
                 Instant.now());

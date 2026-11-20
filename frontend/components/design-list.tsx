@@ -8,6 +8,7 @@ import { date, message } from "@/lib/format";
 import { useResource } from "@/lib/use-resource";
 import { useSession } from "./session-provider";
 import { Empty, Failure, Loading } from "./resource-state";
+import { ScenarioField } from "./scenario-field";
 
 export function DesignList() {
   const { authorization } = useSession();
@@ -51,8 +52,7 @@ export function DesignList() {
         <form onSubmit={create} className="stack">
           <label>Name<input name="name" required pattern={".*\\S.*"} disabled={pending} /></label>
           <label>Description<textarea name="description" rows={3} disabled={pending} /></label>
-          <label>Scenario<input name="scenario" required pattern={".*\\S.*"} disabled={pending} aria-describedby="scenario-help" /></label>
-          <p id="scenario-help" className="muted">Enter the scenario identifier supported by your simulation service.</p>
+          <ScenarioField name="scenario" disabled={pending} />
           {error && <p className="notice error" role="alert">{error}</p>}
           <button className="primary" disabled={pending}>{pending ? "Creating…" : "Create design"}</button>
         </form>

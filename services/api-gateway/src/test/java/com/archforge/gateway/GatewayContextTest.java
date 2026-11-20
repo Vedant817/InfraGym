@@ -66,6 +66,7 @@ class GatewayContextTest {
                 Map.entry("/api/v1/session/123", "canvas-session"),
                 Map.entry("/api/v1/evaluate/123", "ai-evaluator"),
                 Map.entry("/api/v1/designs", "design-service"),
+                Map.entry("/api/v1/designs/scenarios", "design-service"),
                 Map.entry("/api/v1/designs/123/submissions", "design-service"),
                 Map.entry("/api/v1/submissions/123/evaluation", "design-service"),
                 Map.entry("/api/v1/admin/replay-dlq", "graph-compiler-admin"),

@@ -7,6 +7,7 @@ test("requests use the real topology and submission endpoints and forward Basic 
   const calls = [];
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options });
+    if (String(url).endsWith("/designs/scenarios")) return Response.json([{ value: "normal", displayName: "Steady state", description: "Baseline." }]);
     return Response.json({ id: "saved", revision: 8, topology: { nodes: [], edges: [] } });
   };
   try {
@@ -23,8 +24,12 @@ test("requests use the real topology and submission endpoints and forward Basic 
     assert.equal(calls[1].url, "/api/v1/designs/d1/submissions");
     assert.equal(calls[1].options.method, "POST");
     assert.deepEqual(JSON.parse(calls[1].options.body), { scenario: "burst", scenarioNotes: "queue pressure", sessionId: "session1" });
+    const scenarios = await api.scenarios("Basic test");
+    assert.equal(scenarios[0].value, "normal");
+    assert.equal(calls[2].url, "/api/v1/designs/scenarios");
+    assert.equal(calls[2].options.headers.Authorization, "Basic test");
     await api.series("Basic test", "s1", "node/with space");
-    assert.equal(calls[2].url, "/api/v1/submissions/s1/metrics/node%2Fwith%20space/series?metric=latency_ms");
+    assert.equal(calls[3].url, "/api/v1/submissions/s1/metrics/node%2Fwith%20space/series?metric=latency_ms");
   } finally { globalThis.fetch = original; }
 });
 

@@ -5,6 +5,7 @@ import com.archforge.design.canvas.CanvasRepository;
 import com.archforge.design.canvas.TopologySnapshot;
 import com.archforge.design.domain.DesignEntity;
 import com.archforge.design.repository.DesignRepository;
+import com.archforge.contracts.lifecycle.ScenarioType;
 import com.archforge.design.service.SubmissionService;
 import lombok.extern.slf4j.Slf4j;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -59,6 +60,12 @@ public class DesignController {
         this.objectMapper = objectMapper;
     }
 
+    /** Every workload the simulator can run, in declaration order. */
+    @GetMapping("/scenarios")
+    public List<Dtos.ScenarioOption> scenarios() {
+        return ScenarioCatalog.list();
+    }
+
     @GetMapping
     public List<Dtos.DesignSummary> list(Authentication authentication,
                                          @RequestParam(defaultValue = "50") int limit) {
@@ -85,8 +92,9 @@ public class DesignController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "A design needs a topology: topology was null or absent");
         }
+        ScenarioType scenario = ScenarioCatalog.require(request.scenario());
         DesignEntity design = DesignEntity.create(userId, request.name(), request.description(),
-                request.scenario(),
+                scenario.getValue(),
                 request.topology().getNodes().size(), request.topology().getEdges().size());
         designs.save(design);
         canvases.create(design.getId().toString(), userId,
@@ -193,8 +201,12 @@ public class DesignController {
         String userId = authentication.getName();
         Dtos.SubmitRequest body = request == null
                 ? new Dtos.SubmitRequest(null, null, null) : request;
+        // Resolved before the try. The catches below are for a missing design and a
+        // design with no topology. An unknown workload is a 400, and folding it into
+        // either of those would report the wrong failure.
+        ScenarioType scenario = ScenarioCatalog.require(body.scenario());
         try {
-            var submission = submissions.submit(id, userId, body.scenario(),
+            var submission = submissions.submit(id, userId, scenario.getValue(),
                     body.scenarioNotes(), body.sessionId());
             return ResponseEntity.accepted()
                     .body(new Dtos.SubmissionSummary(submission.getId(), submission.getDesignId(),

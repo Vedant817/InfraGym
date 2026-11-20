@@ -19,6 +19,16 @@ public final class Dtos {
     private Dtos() {
     }
 
+    /**
+     * One workload the simulator can execute.
+     *
+     * <p>The value is what a design and a submission store. The display name and
+     * description are what a person chooses from. The list is {@code ScenarioType},
+     * not a second catalog.
+     */
+    public record ScenarioOption(String value, String displayName, String description) {
+    }
+
     /** A row in the design list. Cheap to build: no topology. */
     public record DesignSummary(
             UUID id,

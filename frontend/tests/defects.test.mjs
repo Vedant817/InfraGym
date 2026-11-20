@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { rejectionNotice, terminal } from "../lib/format.ts";
+import { initialScenarioValue } from "../lib/scenario.ts";
 import {
   compilableComponentTypes, componentLabel, componentTypes, dataWithoutLabel, isCompilableType,
   labelById, newNode, nodeLabel, parseParameters, preflight, serializeTopology, withLabel,
@@ -165,6 +166,23 @@ test("per-node rejection detail is read from the lifecycle event", () => {
   // Older events with no details yield nothing rather than throwing.
   assert.deepEqual(rejectionFindings([{ stage: "x", status: "rejected", message: "m", occurredAt: "", receivedAt: "" }]), []);
   assert.deepEqual(rejectionFindings(undefined), []);
+});
+
+test("an unknown stored scenario is not replaced by the first workload", () => {
+  const options = [
+    { value: "normal", displayName: "Steady state" },
+    { value: "flash_sale", displayName: "Flash sale" },
+  ];
+  assert.equal(initialScenarioValue("flash_sale", options), "flash_sale");
+  assert.equal(initialScenarioValue("  flash_sale  ", options), "flash_sale");
+  // A name the catalog does not list stays empty, so the required control cannot
+  // submit steady state in its place.
+  assert.equal(initialScenarioValue("burst", options), "");
+  assert.equal(initialScenarioValue("FLASH-SALE", options), "");
+  // A new design has no stored name. The control shows the first declared workload.
+  assert.equal(initialScenarioValue(undefined, options), "normal");
+  assert.equal(initialScenarioValue("   ", options), "normal");
+  assert.equal(initialScenarioValue("burst", []), "");
 });
 
 test("the palette offers only types the compiler accepts", () => {

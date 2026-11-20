@@ -11,6 +11,7 @@ import { useResource } from "@/lib/use-resource";
 import { SystemDesignCanvas } from "./canvas/SystemDesignCanvas";
 import { Failure, Loading } from "./resource-state";
 import { useSession } from "./session-provider";
+import { ScenarioField } from "./scenario-field";
 import { SubmissionList } from "./submission-list";
 
 function Preflight({ topology }: { topology: Topology }) {
@@ -125,7 +126,7 @@ function Editor({ initial, reload }: { initial: DesignDetail; reload: () => void
     <SystemDesignCanvas key={canvasVersion} initialTopology={topology} disabled={!!busy} onChange={changed} onDraft={setDraft} />
     <section className="panel" aria-labelledby="run-title"><h2 id="run-title">Run this design</h2>
       <form onSubmit={submit} className="run-form">
-        <label>Scenario<input name="scenario" defaultValue={design.scenario} required pattern={".*\\S.*"} disabled={!!busy} /></label>
+        <ScenarioField name="scenario" defaultValue={design.scenario} disabled={!!busy} />
         <label>Scenario notes<textarea name="notes" rows={2} disabled={!!busy} /></label>
         <button className="primary" disabled={!!busy || draft || conflict || topology.nodes.length === 0}>{busy === "submit" ? "Saving and submitting…" : dirty ? "Save and start run" : "Start run"}</button>
       </form>

@@ -23,7 +23,7 @@ test("only terminal submissions stop polling", () => {
 });
 test("proxy accepts only verified endpoint and method combinations", () => {
   for (const [method, path] of [
-    ["GET", "designs"], ["POST", "designs"], ["GET", "designs/123"], ["DELETE", "designs/123"],
+    ["GET", "designs"], ["POST", "designs"], ["GET", "designs/scenarios"], ["GET", "designs/123"], ["DELETE", "designs/123"],
     ["PUT", "designs/123/topology"], ["POST", "designs/123/submissions"],
     ["GET", "submissions"], ["GET", "submissions/456"], ["GET", "submissions/456/measurements"],
     ["GET", "submissions/456/evaluation"], ["GET", "submissions/456/metrics/service-1/series"],

@@ -36,6 +36,7 @@ export interface DesignSummary {
   updatedAt: string;
 }
 export interface DesignDetail extends Omit<DesignSummary, "nodeCount" | "edgeCount"> { topology: Topology }
+export interface ScenarioOption { value: string; displayName: string; description: string }
 export interface CreateDesignRequest { name: string; description: string; scenario: string; topology: Topology }
 export interface SaveTopologyRequest { topology: Topology; expectedRevision: number }
 export interface SubmitRequest { scenario: string; scenarioNotes: string; sessionId: string }

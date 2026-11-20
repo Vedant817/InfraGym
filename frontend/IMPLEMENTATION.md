@@ -89,8 +89,11 @@ severity order and show evidence, recommendations, and related components. Laten
 charts use real per-window percentiles and preserve missing-sample gaps, with an exact
 data table available alongside.
 
-No scenario catalog or per-component compiler parameter contract was provided, so
-scenario identifiers and parameters remain user-entered. No invented discovery APIs,
+`GET /api/v1/designs/scenarios` lists `ScenarioType`. Create and run choose from
+that list. An unknown scenario is rejected with 400 rather than stored as steady
+state. A stored name that is not in the list stays unselected, so the next save
+or run cannot replace it with the first workload until a person chooses one.
+Node parameters remain user-entered JSON. No invented discovery APIs,
 automatic layout, import workflow, or authentication persistence are implemented.
 
 ## Validation

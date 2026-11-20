@@ -1,4 +1,4 @@
-import type { CreateDesignRequest, DesignDetail, DesignSummary, Evaluation, LatencyWindow, Measurements, SaveTopologyRequest, Submission, SubmissionDetail, SubmitRequest } from "./contracts";
+import type { CreateDesignRequest, DesignDetail, DesignSummary, Evaluation, LatencyWindow, Measurements, SaveTopologyRequest, ScenarioOption, Submission, SubmissionDetail, SubmitRequest } from "./contracts";
 
 export class ApiError extends Error {
   public status: number;
@@ -49,6 +49,7 @@ export async function request<T>(authorization: string, path: string, options: R
 }
 const id = encodeURIComponent;
 export const api = {
+  scenarios: (auth: string, signal?: AbortSignal) => request<ScenarioOption[]>(auth, "/designs/scenarios", { signal }),
   designs: (auth: string, signal?: AbortSignal) => request<DesignSummary[]>(auth, "/designs", { signal }),
   design: (auth: string, designId: string, signal?: AbortSignal) => request<DesignDetail>(auth, `/designs/${id(designId)}`, { signal }),
   create: (auth: string, body: CreateDesignRequest) => request<DesignDetail>(auth, "/designs", { method: "POST", body: JSON.stringify(body) }),
